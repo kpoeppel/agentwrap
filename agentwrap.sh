@@ -6,6 +6,7 @@ ALLOWED_HOSTS=()
 PROJECT_SRC=""
 CMD_ARGS=()
 RO_MOUNTS=()
+RW_MOUNTS=()
 
 # --- PARSE ARGUMENTS ---
 while [[ $# -gt 0 ]]; do
@@ -19,8 +20,16 @@ while [[ $# -gt 0 ]]; do
             RO_MOUNTS+=( "$HOME" )
             shift 1
             ;;
+        --mount-ro)
+            RO_MOUNTS+=( "$2" )
+            shift 2
+            ;;
+        --mount-rw)
+            RW_MOUNTS+=( "$2" )
+            shift 2
+            ;;
         --help)
-            echo "USAGE: ./agentwrap.sh /project/path "
+            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] /project/path [command...]"
             exit 0
             ;;
         -*) # Handle other flags if you add them
@@ -62,7 +71,7 @@ RO_MOUNTS+=(
 
 # Directories the agent has FULL autonomy over
 # Note: $MERGED is handled separately as the project root
-RW_MOUNTS=(
+RW_MOUNTS+=(
     "$HOME/.cache/agent_shared:$HOME/.cache"
     "$HOME/.gemini"
     "$HOME/.codex"
@@ -211,4 +220,3 @@ script -q -f -c "bwrap ${BWRAP_ARGS[*]} $HOME/entrypoint.sh" "$LOG_FILE"
 # 4. Cleanup
 fusermount -u "$MERGED"
 echo "--- Sandbox Closed ---"
-

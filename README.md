@@ -36,6 +36,8 @@ If no command is provided, an interactive bash shell starts inside the sandbox.
 
 - `--allow-ssh <host>`: Allow SSH only to the specified host. Can be provided multiple times.
 - `--mount-home`: Mount your entire home directory read-only inside the sandbox.
+- `--mount-ro <path>`: Add an extra read-only mount. Can be provided multiple times.
+- `--mount-rw <src[:dest]>`: Add an extra read-write mount. If `:dest` is omitted, mounts to the same path inside.
 - `--help`: Show basic usage.
 
 ### Examples
@@ -56,6 +58,12 @@ Allow SSH to a host (scoped to its resolved config and key):
 
 ```bash
 ./agentwrap.sh ~/src/myproject --allow-ssh github.com
+```
+
+Add extra mounts:
+
+```bash
+./agentwrap.sh ~/src/myproject --mount-ro /opt/tools --mount-rw /data:/mnt/data
 ```
 
 ## How it works (high level)
