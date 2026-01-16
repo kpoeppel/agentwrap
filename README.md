@@ -38,7 +38,7 @@ If no command is provided, an interactive bash shell starts inside the sandbox.
 - `--mount-home`: Mount your entire home directory read-only inside the sandbox.
 - `--mount-ro <path>`: Add an extra read-only mount. Can be provided multiple times.
 - `--mount-rw <src[:dest]>`: Add an extra read-write mount. If `:dest` is omitted, mounts to the same path inside.
-- `--sync-real-from-sandbox`: Copy the merged sandbox view back into the real project and exit (uses `rsync`).
+- `--sync-out`: Copy the merged sandbox view back into the real project and exit (uses `rsync`).
 - `--sync-exclude <path>`: Exclude a path pattern from sync. Can be provided multiple times.
 - `--help`: Show basic usage.
 

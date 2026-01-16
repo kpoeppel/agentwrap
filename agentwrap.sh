@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
             RW_MOUNTS+=( "$2" )
             shift 2
             ;;
-        --sync-real-from-sandbox)
+        --sync-out)
             SYNC_REAL_FROM_SANDBOX=1
             shift 1
             ;;
