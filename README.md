@@ -38,6 +38,8 @@ If no command is provided, an interactive bash shell starts inside the sandbox.
 - `--mount-home`: Mount your entire home directory read-only inside the sandbox.
 - `--mount-ro <path>`: Add an extra read-only mount. Can be provided multiple times.
 - `--mount-rw <src[:dest]>`: Add an extra read-write mount. If `:dest` is omitted, mounts to the same path inside.
+- `--sync-real-from-sandbox`: Copy the merged sandbox view back into the real project and exit (uses `rsync`).
+- `--sync-exclude <path>`: Exclude a path pattern from sync. Can be provided multiple times.
 - `--help`: Show basic usage.
 
 ### Examples
@@ -57,13 +59,19 @@ Run a single command:
 Allow SSH to a host (scoped to its resolved config and key):
 
 ```bash
-./agentwrap.sh ~/src/myproject --allow-ssh github.com
+./agentwrap.sh --allow-ssh github.com ~/src/myproject
 ```
 
 Add extra mounts:
 
 ```bash
-./agentwrap.sh ~/src/myproject --mount-ro /opt/tools --mount-rw /data:/mnt/data
+./agentwrap.sh --mount-ro /opt/tools --mount-rw /data:/mnt/data ~/src/myproject
+```
+
+Sync changes from the sandbox back to the real project:
+
+```bash
+./agentwrap.sh --sync-real-from-sandbox --sync-exclude node_modules ~/src/myproject
 ```
 
 ## How it works (high level)

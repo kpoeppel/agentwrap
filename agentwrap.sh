@@ -7,6 +7,8 @@ PROJECT_SRC=""
 CMD_ARGS=()
 RO_MOUNTS=()
 RW_MOUNTS=()
+SYNC_REAL_FROM_SANDBOX=""
+SYNC_EXCLUDES=()
 
 # --- PARSE ARGUMENTS ---
 while [[ $# -gt 0 ]]; do
@@ -28,8 +30,16 @@ while [[ $# -gt 0 ]]; do
             RW_MOUNTS+=( "$2" )
             shift 2
             ;;
+        --sync-real-from-sandbox)
+            SYNC_REAL_FROM_SANDBOX=1
+            shift 1
+            ;;
+        --sync-exclude)
+            SYNC_EXCLUDES+=("$2")
+            shift 2
+            ;;
         --help)
-            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] /project/path [command...]"
+            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-real-from-sandbox] [--sync-exclude PATH] /project/path [command...]"
             exit 0
             ;;
         -*) # Handle other flags if you add them
@@ -133,6 +143,38 @@ echo "Using CONDA_PREFIX=$CONDA_PREFIX"
 
 # Setup physical directories
 mkdir -p "$UPPER" "$WORK" "$MERGED" "$HOME/.cache/agent_shared"
+
+# If requested, sync from the sandbox to the real project and exit.
+if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
+    echo "--- Syncing sandbox view to $PROJECT_SRC ---"
+    MOUNTED=0
+    if command -v mountpoint >/dev/null 2>&1; then
+        if ! mountpoint -q "$MERGED"; then
+            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
+            MOUNTED=1
+        fi
+    else
+        if ! grep -Fq " $MERGED " /proc/mounts; then
+            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
+            MOUNTED=1
+        fi
+    fi
+
+    if command -v rsync >/dev/null 2>&1; then
+        RSYNC_EXCLUDES=()
+        for pattern in "${SYNC_EXCLUDES[@]}"; do
+            RSYNC_EXCLUDES+=(--exclude "$pattern")
+        done
+        rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$MERGED"/ "$PROJECT_SRC"/
+    else
+        echo "rsync not found; cannot sync changes."
+    fi
+
+    if [[ $MOUNTED -eq 1 ]]; then
+        fusermount -u "$MERGED" 2>/dev/null || umount "$MERGED"
+    fi
+    exit 0
+fi
 
 # 1. Mount the OverlayFS (The "Undo" Button)
 # Allows the agent to 'delete' files without actually touching your source.
