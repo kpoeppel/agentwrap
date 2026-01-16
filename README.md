@@ -39,6 +39,7 @@ If no command is provided, an interactive bash shell starts inside the sandbox.
 - `--mount-ro <path>`: Add an extra read-only mount. Can be provided multiple times.
 - `--mount-rw <src[:dest]>`: Add an extra read-write mount. If `:dest` is omitted, mounts to the same path inside.
 - `--sync-out`: Copy the merged sandbox view back into the real project and exit (uses `rsync`).
+- `--check-diff`: Show whether the sandbox view and real project differ (uses `rsync` dry-run).
 - `--sync-exclude <path>`: Exclude a path pattern from sync. Can be provided multiple times.
 - `--help`: Show basic usage.
 
@@ -72,6 +73,12 @@ Sync changes from the sandbox back to the real project:
 
 ```bash
 ./agentwrap.sh --sync-real-from-sandbox --sync-exclude node_modules ~/src/myproject
+```
+
+Check whether the sandbox view differs from the real project:
+
+```bash
+./agentwrap.sh --check-diff --sync-exclude node_modules ~/src/myproject
 ```
 
 ## How it works (high level)

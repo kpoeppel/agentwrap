@@ -8,6 +8,7 @@ CMD_ARGS=()
 RO_MOUNTS=()
 RW_MOUNTS=()
 SYNC_REAL_FROM_SANDBOX=""
+CHECK_DIFF=""
 SYNC_EXCLUDES=()
 
 # --- PARSE ARGUMENTS ---
@@ -34,12 +35,16 @@ while [[ $# -gt 0 ]]; do
             SYNC_REAL_FROM_SANDBOX=1
             shift 1
             ;;
+        --check-diff)
+            CHECK_DIFF=1
+            shift 1
+            ;;
         --sync-exclude)
             SYNC_EXCLUDES+=("$2")
             shift 2
             ;;
         --help)
-            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-real-from-sandbox] [--sync-exclude PATH] /project/path [command...]"
+            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-real-from-sandbox] [--check-diff] [--sync-exclude PATH] /project/path [command...]"
             exit 0
             ;;
         -*) # Handle other flags if you add them
@@ -144,6 +149,43 @@ echo "Using CONDA_PREFIX=$CONDA_PREFIX"
 # Setup physical directories
 mkdir -p "$UPPER" "$WORK" "$MERGED" "$HOME/.cache/agent_shared"
 
+# If requested, check for differences between sandbox view and real project and exit.
+if [[ -n $CHECK_DIFF ]]; then
+    echo "--- Checking sandbox view vs $PROJECT_SRC ---"
+    MOUNTED=0
+    if command -v mountpoint >/dev/null 2>&1; then
+        if ! mountpoint -q "$MERGED"; then
+            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
+            MOUNTED=1
+        fi
+    else
+        if ! grep -Fq " $MERGED " /proc/mounts; then
+            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
+            MOUNTED=1
+        fi
+    fi
+
+    if command -v rsync >/dev/null 2>&1; then
+        RSYNC_EXCLUDES=()
+        for pattern in "${SYNC_EXCLUDES[@]}"; do
+            RSYNC_EXCLUDES+=(--exclude "$pattern")
+        done
+        DIFF_OUTPUT=$(rsync -a --delete --dry-run --itemize-changes "${RSYNC_EXCLUDES[@]}" "$MERGED"/ "$PROJECT_SRC"/)
+        if [[ -z $DIFF_OUTPUT ]]; then
+            echo "In sync."
+        else
+            echo "$DIFF_OUTPUT"
+        fi
+    else
+        echo "rsync not found; cannot check diff."
+    fi
+
+    if [[ $MOUNTED -eq 1 ]]; then
+        fusermount -u "$MERGED" 2>/dev/null || umount "$MERGED"
+    fi
+    exit 0
+fi
+
 # If requested, sync from the sandbox to the real project and exit.
 if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
     echo "--- Syncing sandbox view to $PROJECT_SRC ---"
@@ -181,7 +223,6 @@ fi
 fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
 
 echo "RESOLV" "$AGENT_RESOLV"
-cat $AGENT_RESOLV
 
 # 2. Build the Bubblewrap command
 BWRAP_ARGS=(
