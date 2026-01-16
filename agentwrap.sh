@@ -58,6 +58,9 @@ REAL_RESOLV=$(realpath /etc/resolv.conf)
 # Define where the 'actual' file will live inside the bubble
 INTERNAL_DNS_PATH=$REAL_RESOLV
 
+# Ensure sandbox root exists before writing any derived files (e.g. resolv.conf)
+mkdir -p "$SANDBOX_ROOT"
+
 # --- CONFIGURATION ---
 # Directories the agent can READ but not TOUCH
 RO_MOUNTS+=(
