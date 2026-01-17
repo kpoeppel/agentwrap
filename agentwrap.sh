@@ -82,7 +82,7 @@ TARGET_PATH="$PROJECT_SRC"
 REAL_RESOLV=$(realpath /etc/resolv.conf)
 # Define where the 'actual' file will live inside the bubble
 INTERNAL_DNS_PATH=$REAL_RESOLV
-LOCK_FILE="$PROJECT_SRC/.agentwrap.lock"
+LOCK_FILE="$SANDBOX_ROOT/lock"
 LOCK_HELD=""
 
 # Ensure sandbox root exists before writing any derived files (e.g. resolv.conf)
@@ -174,9 +174,22 @@ ensure_merged_dir() {
         return
     fi
     if [[ -L "$MERGED" ]]; then
-        rm "$MERGED"
+        if ! rm "$MERGED"; then
+            echo "agentwrap: failed to remove symlink at $MERGED."
+            exit 1
+        fi
+    elif [[ -e "$MERGED" && ! -d "$MERGED" ]]; then
+        echo "agentwrap: $MERGED exists and is not a directory."
+        exit 1
     fi
-    mkdir -p "$MERGED"
+    if ! mkdir -p "$MERGED"; then
+        echo "agentwrap: failed to create $MERGED."
+        exit 1
+    fi
+    if [[ -L "$MERGED" ]]; then
+        echo "agentwrap: $MERGED is still a symlink; refusing to mount."
+        exit 1
+    fi
 }
 
 ensure_merged_symlink() {
@@ -221,6 +234,7 @@ acquire_lock() {
         echo "project=$PROJECT_SRC"
         echo "sandbox=$SANDBOX_ROOT"
     } > "$LOCK_FILE"
+    chmod 600 "$LOCK_FILE"
     LOCK_HELD=1
 }
 
@@ -336,6 +350,7 @@ BWRAP_ARGS=(
     --bind "$MERGED" "$TARGET_PATH" # Maps overlay to the real path
     --chdir "$TARGET_PATH"          # Start the agent where it expects to be    
     --ro-bind "$AGENT_CONFIG" "$HOME/.bashrc"
+    --ro-bind "$LOCK_FILE" "$HOME/.agentwrap.lock"
     --unshare-all
     --share-net
     --dir $HOME/.ssh

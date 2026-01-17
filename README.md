@@ -95,8 +95,8 @@ Check whether the sandbox view differs from the real project:
 - DNS is copied from `/etc/resolv.conf` into the sandbox and ensured to have at least one public resolver. 
   The original `/etc/resolv.conf` is assumed to be a symlink as very common on Linux!
 - SSH access is opt-in; when enabled, only the selected host(s) and key(s) are visible.
-- While a sandbox is active, `agentwrap` creates `.agentwrap.lock` in the project root.
-  Remove it with `--unlock` if it becomes stale.
+- While a sandbox is active, `agentwrap` creates a lock at `~/.agent_sandboxes/<project>_<hash>/lock`
+  and exposes it inside the sandbox as `~/.agentwrap.lock`. Remove it with `--unlock` if it becomes stale.
 - When no sandbox is active, the sandbox `merged` path (`~/.agent_sandboxes/<project>_<hash>/merged`)
   is a symlink to the real project so external tools stay current.
 
