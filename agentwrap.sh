@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help)
-            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-real-from-sandbox] [--check-diff] [--sync-exclude PATH] /project/path [command...]"
+            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-out] [--check-diff] [--sync-exclude PATH] /project/path [command...]"
             exit 0
             ;;
         -*) # Handle other flags if you add them
