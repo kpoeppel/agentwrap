@@ -68,6 +68,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -n "${AGENTWRAP_ACTIVE:-}" ]]; then
+    echo "agentwrap: detected AGENTWRAP_ACTIVE in environment; refusing to nest."
+    exit 1
+fi
+
 
 SANDBOX_ROOT="$HOME/.agent_sandboxes/$(basename "$PROJECT_SRC")_$(echo "$PROJECT_SRC" | md5sum | head -c 6)"
 UPPER="$SANDBOX_ROOT/upper"
@@ -338,6 +343,7 @@ BWRAP_ARGS=(
     --setenv PATH "$HOME/.local/bin:$HOME/.miniconda3/bin:/usr/bin:/bin"
     --setenv NVM_DIR "$HOME/.nvm"
     --setenv HOME "$HOME"
+    --setenv AGENTWRAP_ACTIVE "1"
     --ro-bind "/etc" "/etc"
     --ro-bind "$AGENT_RESOLV" "$INTERNAL_DNS_PATH"
 )
