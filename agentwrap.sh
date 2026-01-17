@@ -10,6 +10,7 @@ RW_MOUNTS=()
 SYNC_REAL_FROM_SANDBOX=""
 CHECK_DIFF=""
 SYNC_EXCLUDES=()
+UNLOCK_ONLY=""
 
 # --- PARSE ARGUMENTS ---
 while [[ $# -gt 0 ]]; do
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
             SYNC_REAL_FROM_SANDBOX=1
             shift 1
             ;;
+        --unlock)
+            UNLOCK_ONLY=1
+            shift 1
+            ;;
         --check-diff)
             CHECK_DIFF=1
             shift 1
@@ -44,7 +49,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help)
-            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-out] [--check-diff] [--sync-exclude PATH] /project/path [command...]"
+            echo "USAGE: ./agentwrap.sh [--mount-ro PATH] [--mount-rw SRC[:DEST]] [--mount-home] [--sync-out] [--check-diff] [--sync-exclude PATH] [--unlock] /project/path [command...]"
             exit 0
             ;;
         -*) # Handle other flags if you add them
@@ -72,6 +77,8 @@ TARGET_PATH="$PROJECT_SRC"
 REAL_RESOLV=$(realpath /etc/resolv.conf)
 # Define where the 'actual' file will live inside the bubble
 INTERNAL_DNS_PATH=$REAL_RESOLV
+LOCK_FILE="$PROJECT_SRC/.agentwrap.lock"
+LOCK_HELD=""
 
 # Ensure sandbox root exists before writing any derived files (e.g. resolv.conf)
 mkdir -p "$SANDBOX_ROOT"
@@ -90,7 +97,7 @@ RO_MOUNTS+=(
 # Directories the agent has FULL autonomy over
 # Note: $MERGED is handled separately as the project root
 RW_MOUNTS+=(
-    "$HOME/.cache/agent_shared:$HOME/.cache"
+    "$HOME/.cache:$HOME/.cache"
     "$HOME/.gemini"
     "$HOME/.codex"
     "$HOME/.claude"
@@ -147,22 +154,113 @@ RW_MOUNTS+=("$SSH_JAIL/config:$HOME/.ssh/config")
 echo "Using CONDA_PREFIX=$CONDA_PREFIX"
 
 # Setup physical directories
-mkdir -p "$UPPER" "$WORK" "$MERGED" "$HOME/.cache/agent_shared"
+mkdir -p "$UPPER" "$WORK" 
+
+is_mounted() {
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "$MERGED"
+    else
+        grep -Fq " $MERGED " /proc/mounts
+    fi
+}
+
+ensure_merged_dir() {
+    if is_mounted; then
+        return
+    fi
+    if [[ -L "$MERGED" ]]; then
+        rm "$MERGED"
+    fi
+    mkdir -p "$MERGED"
+}
+
+ensure_merged_symlink() {
+    if is_mounted; then
+        return
+    fi
+    if [[ -L "$MERGED" ]]; then
+        return
+    fi
+    if [[ -d "$MERGED" ]]; then
+        if rmdir "$MERGED" 2>/dev/null; then
+            ln -s "$PROJECT_SRC" "$MERGED"
+        else
+            echo "Warning: $MERGED exists and is not empty; leaving as-is."
+        fi
+        return
+    fi
+    if [[ -e "$MERGED" ]]; then
+        echo "Warning: $MERGED exists and is not a directory or symlink; leaving as-is."
+        return
+    fi
+    ln -s "$PROJECT_SRC" "$MERGED"
+}
+
+acquire_lock() {
+    if [[ -e "$LOCK_FILE" ]]; then
+        local pid=""
+        pid=$(awk -F= '$1 == "pid" {print $2}' "$LOCK_FILE" 2>/dev/null)
+        if [[ -n "$pid" && -d "/proc/$pid" ]]; then
+            echo "agentwrap: lock file exists at $LOCK_FILE (pid $pid)."
+            echo "agentwrap: project already wrapped; aborting."
+            exit 1
+        fi
+        echo "agentwrap: stale lock file exists at $LOCK_FILE."
+        echo "agentwrap: run with --unlock to clear it."
+        exit 1
+    fi
+
+    {
+        echo "pid=$$"
+        echo "started=$(date -Iseconds)"
+        echo "project=$PROJECT_SRC"
+        echo "sandbox=$SANDBOX_ROOT"
+    } > "$LOCK_FILE"
+    LOCK_HELD=1
+}
+
+release_lock() {
+    if [[ -n "$LOCK_HELD" && -e "$LOCK_FILE" ]]; then
+        rm -f "$LOCK_FILE"
+    fi
+}
+
+cleanup() {
+    if is_mounted; then
+        fusermount -u "$MERGED" 2>/dev/null || umount "$MERGED"
+    fi
+    release_lock
+    ensure_merged_symlink
+}
+
+if [[ -n "$UNLOCK_ONLY" ]]; then
+    rm -f "$LOCK_FILE"
+    ensure_merged_symlink
+    echo "agentwrap: cleared lock at $LOCK_FILE."
+    exit 0
+fi
+
+if [[ -e "$LOCK_FILE" ]]; then
+    pid=""
+    pid=$(awk -F= '$1 == "pid" {print $2}' "$LOCK_FILE" 2>/dev/null)
+    if [[ -n "$pid" && -d "/proc/$pid" ]]; then
+        echo "agentwrap: lock file exists at $LOCK_FILE (pid $pid)."
+        echo "agentwrap: project already wrapped; aborting."
+        exit 1
+    fi
+    echo "agentwrap: stale lock file exists at $LOCK_FILE."
+    echo "agentwrap: run with --unlock to clear it."
+    exit 1
+fi
 
 # If requested, check for differences between sandbox view and real project and exit.
 if [[ -n $CHECK_DIFF ]]; then
     echo "--- Checking sandbox view vs $PROJECT_SRC ---"
     MOUNTED=0
-    if command -v mountpoint >/dev/null 2>&1; then
-        if ! mountpoint -q "$MERGED"; then
-            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
-            MOUNTED=1
-        fi
-    else
-        if ! grep -Fq " $MERGED " /proc/mounts; then
-            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
-            MOUNTED=1
-        fi
+    if ! is_mounted; then
+        ensure_merged_dir
+        fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
+        MOUNTED=1
     fi
 
     if command -v rsync >/dev/null 2>&1; then
@@ -182,6 +280,7 @@ if [[ -n $CHECK_DIFF ]]; then
 
     if [[ $MOUNTED -eq 1 ]]; then
         fusermount -u "$MERGED" 2>/dev/null || umount "$MERGED"
+        ensure_merged_symlink
     fi
     exit 0
 fi
@@ -190,16 +289,10 @@ fi
 if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
     echo "--- Syncing sandbox view to $PROJECT_SRC ---"
     MOUNTED=0
-    if command -v mountpoint >/dev/null 2>&1; then
-        if ! mountpoint -q "$MERGED"; then
-            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
-            MOUNTED=1
-        fi
-    else
-        if ! grep -Fq " $MERGED " /proc/mounts; then
-            fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
-            MOUNTED=1
-        fi
+    if ! is_mounted; then
+        ensure_merged_dir
+        fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
+        MOUNTED=1
     fi
 
     if command -v rsync >/dev/null 2>&1; then
@@ -214,12 +307,17 @@ if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
 
     if [[ $MOUNTED -eq 1 ]]; then
         fusermount -u "$MERGED" 2>/dev/null || umount "$MERGED"
+        ensure_merged_symlink
     fi
     exit 0
 fi
 
+acquire_lock
+trap cleanup EXIT INT TERM
+
 # 1. Mount the OverlayFS (The "Undo" Button)
 # Allows the agent to 'delete' files without actually touching your source.
+ensure_merged_dir
 fuse-overlayfs -o lowerdir="$PROJECT_SRC",upperdir="$UPPER",workdir="$WORK" "$MERGED"
 
 echo "RESOLV" "$AGENT_RESOLV"
@@ -304,5 +402,6 @@ script -q -f -c "bwrap ${BWRAP_ARGS[*]} $HOME/entrypoint.sh" "$LOG_FILE"
 [ ! -s "$LOG_FILE" ] && rm "$LOG_FILE"
 
 # 4. Cleanup
-fusermount -u "$MERGED"
+cleanup
+trap - EXIT INT TERM
 echo "--- Sandbox Closed ---"

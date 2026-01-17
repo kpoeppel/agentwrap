@@ -41,6 +41,7 @@ If no command is provided, an interactive bash shell starts inside the sandbox.
 - `--sync-out`: Copy the merged sandbox view back into the real project and exit (uses `rsync`).
 - `--check-diff`: Show whether the sandbox view and real project differ (uses `rsync` dry-run).
 - `--sync-exclude <path>`: Exclude a path pattern from sync. Can be provided multiple times.
+- `--unlock`: Remove a stale `.agentwrap.lock` file for the project and exit.
 - `--help`: Show basic usage.
 
 ### Examples
@@ -72,7 +73,7 @@ Add extra mounts:
 Sync changes from the sandbox back to the real project:
 
 ```bash
-./agentwrap.sh --sync-real-from-sandbox --sync-exclude node_modules ~/src/myproject
+./agentwrap.sh --sync-out --sync-exclude node_modules ~/src/myproject
 ```
 
 Check whether the sandbox view differs from the real project:
@@ -94,6 +95,10 @@ Check whether the sandbox view differs from the real project:
 - DNS is copied from `/etc/resolv.conf` into the sandbox and ensured to have at least one public resolver. 
   The original `/etc/resolv.conf` is assumed to be a symlink as very common on Linux!
 - SSH access is opt-in; when enabled, only the selected host(s) and key(s) are visible.
+- While a sandbox is active, `agentwrap` creates `.agentwrap.lock` in the project root.
+  Remove it with `--unlock` if it becomes stale.
+- When no sandbox is active, the sandbox `merged` path (`~/.agent_sandboxes/<project>_<hash>/merged`)
+  is a symlink to the real project so external tools stay current.
 
 ## Troubleshooting
 
