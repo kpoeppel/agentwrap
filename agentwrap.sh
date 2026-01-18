@@ -84,9 +84,13 @@ REAL_RESOLV=$(realpath /etc/resolv.conf)
 INTERNAL_DNS_PATH=$REAL_RESOLV
 LOCK_FILE="$SANDBOX_ROOT/lock"
 LOCK_HELD=""
+BASH_HISTORY_FILE="$SANDBOX_ROOT/bash_history"
 
 # Ensure sandbox root exists before writing any derived files (e.g. resolv.conf)
 mkdir -p "$SANDBOX_ROOT"
+
+# Create persistent bash history file if it doesn't exist
+touch "$BASH_HISTORY_FILE"
 
 # --- CONFIGURATION ---
 # Directories the agent can READ but not TOUCH
@@ -107,6 +111,7 @@ RW_MOUNTS+=(
     "$HOME/.codex"
     "$HOME/.claude"
     "$HOME/.claude.json"
+    "$BASH_HISTORY_FILE:$HOME/.bash_history"
 )
 # ---------------------
 
