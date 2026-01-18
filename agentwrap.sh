@@ -25,11 +25,11 @@ while [[ $# -gt 0 ]]; do
             shift 1
             ;;
         --mount-ro)
-            RO_MOUNTS+=( "$2" )
+            RO_MOUNTS+=( $(realpath "$2") )
             shift 2
             ;;
         --mount-rw)
-            RW_MOUNTS+=( "$2" )
+            RW_MOUNTS+=( $(realpath "$2") )
             shift 2
             ;;
         --sync-out)
@@ -419,9 +419,9 @@ done
 BWRAP_ARGS+=(--ro-bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
 echo "--- Sandbox Active: Recording to $LOG_FILE ---"
-
+echo "${BWRAP_ARGS[*]}"
 # limit resources in the future
-# prlimit --as=$MEM_LIMIT --nproc=1000 
+# prlimit --as=$MEM_LIMIT --nproc=1000
 script -q -f -c "bwrap ${BWRAP_ARGS[*]} $HOME/entrypoint.sh" "$LOG_FILE"
 
 # Optional: Clean up empty log files
