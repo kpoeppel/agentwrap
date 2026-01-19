@@ -570,7 +570,6 @@ done
 BWRAP_ARGS+=(--ro-bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
 echo "--- Sandbox Active: Recording to $LOG_FILE ---"
-echo "${BWRAP_ARGS[*]}"
 # limit resources in the future
 # prlimit --as=$MEM_LIMIT --nproc=1000
 script -q -f -c "bwrap ${BWRAP_ARGS[*]} $HOME/entrypoint.sh" "$LOG_FILE"
