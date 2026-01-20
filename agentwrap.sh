@@ -27,11 +27,11 @@ while [[ $# -gt 0 ]]; do
             shift 1
             ;;
         --mount-ro)
-            RO_MOUNTS+=( "$2" )
+            RO_MOUNTS+=( $(realpath "$2") )
             shift 2
             ;;
         --mount-rw)
-            RW_MOUNTS+=( "$2" )
+            RW_MOUNTS+=( $(realpath "$2") )
             shift 2
             ;;
         --sync-out)
