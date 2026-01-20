@@ -8,11 +8,13 @@ CMD_ARGS=()
 RO_MOUNTS=()
 RW_MOUNTS=()
 SYNC_REAL_FROM_SANDBOX=""
+SYNC_REAL_TO_SANDBOX=""
 CHECK_DIFF=""
 SYNC_EXCLUDES=()
 UNLOCK_ONLY=""
 
 # --- PARSE ARGUMENTS ---
+# Parse options first (must come before project paths)
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --allow-ssh)
@@ -25,15 +27,19 @@ while [[ $# -gt 0 ]]; do
             shift 1
             ;;
         --mount-ro)
-            RO_MOUNTS+=( $(realpath "$2") )
+            RO_MOUNTS+=( "$2" )
             shift 2
             ;;
         --mount-rw)
-            RW_MOUNTS+=( $(realpath "$2") )
+            RW_MOUNTS+=( "$2" )
             shift 2
             ;;
         --sync-out)
             SYNC_REAL_FROM_SANDBOX=1
+            shift 1
+            ;;
+        --sync-in)
+            SYNC_REAL_TO_SANDBOX=1
             shift 1
             ;;
         --unlock)
@@ -49,20 +55,26 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help)
-            echo "USAGE: ./agentwrap.sh [OPTIONS] /path1 [/path2 ...] [-- command...]"
+            echo "USAGE: agentwrap [OPTIONS] /path1 [/path2 ...] [-- command...]"
             echo ""
-            echo "OPTIONS:"
+            echo "OPTIONS (must come before project paths):"
             echo "  --mount-ro PATH       Mount PATH as read-only"
             echo "  --mount-rw SRC[:DEST] Mount SRC as read-write (optionally at DEST)"
             echo "  --mount-home          Mount entire home directory as read-only"
             echo "  --allow-ssh HOST      Allow SSH access to HOST"
             echo "  --sync-out            Sync sandbox changes to real project(s)"
+            echo "  --sync-in             Discard sandbox changes (reset to real project state)"
             echo "  --check-diff          Show differences between sandbox and real project(s)"
             echo "  --sync-exclude PATH   Exclude PATH from sync operations"
             echo "  --unlock              Clear stale lock(s) for the specified project(s)"
             echo ""
-            echo "Use -- to separate project paths from the command to run."
-            echo "Example: agentwrap /project/a /project/b -- claude"
+            echo "EXAMPLES:"
+            echo "  agentwrap /project/path -- bash"
+            echo "  agentwrap /project/a /project/b -- claude"
+            echo "  agentwrap --mount-ro /data /project -- npm test"
+            echo "  agentwrap /project --check-diff"
+            echo "  agentwrap /project --sync-out"
+            echo "  agentwrap /project --sync-in"
             exit 0
             ;;
         --)
@@ -70,13 +82,36 @@ while [[ $# -gt 0 ]]; do
             CMD_ARGS=("$@")
             break
             ;;
-        -*) # Handle other flags if you add them
+        -*)
             echo "Unknown option: $1"
+            echo "Run with --help for usage."
             exit 1
             ;;
-        *) # Collect project paths until -- or end
+        *)
+            # First non-option argument: now collect project paths
             PROJECT_PATHS+=("$(realpath "$1")")
             shift
+
+            # Continue collecting paths and command
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --)
+                        shift
+                        CMD_ARGS=("$@")
+                        break 2
+                        ;;
+                    -*)
+                        echo "Error: options must come before project paths"
+                        echo "Got option '$1' after project path"
+                        exit 1
+                        ;;
+                    *)
+                        PROJECT_PATHS+=("$(realpath "$1")")
+                        shift
+                        ;;
+                esac
+            done
+            break
             ;;
     esac
 done
@@ -120,15 +155,8 @@ get_project_lock() {
 
 # Session sandbox: combines all project paths for unique session identity
 # This holds shared resources: logs, entrypoint, bash_history, resolv.conf
-if [[ "${#PROJECT_PATHS[@]}" -gt 1 ]]
-then
 SESSION_HASH=$(printf '%s\n' "${PROJECT_PATHS[@]}" | sort | md5sum | head -c 6)
 SESSION_SANDBOX="$HOME/.agent_sandboxes/session_${SESSION_HASH}"
-else
-SESSION_HASH=$(echo "${PROJECT_PATHS[0]}" | md5sum | head -c 6)
-SESSION_SANDBOX="$HOME/.agent_sandboxes/$(basename "$PROJECT_SRC")_${SESSION_HASH}"
-fi
-
 
 REAL_RESOLV=$(realpath /etc/resolv.conf)
 INTERNAL_DNS_PATH=$REAL_RESOLV
@@ -148,9 +176,6 @@ for proj in "${PROJECT_PATHS[@]}"; do
     sandbox=$(get_project_sandbox "$proj")
     mkdir -p "$sandbox" "$(get_project_upper "$proj")" "$(get_project_work "$proj")"
 done
-
-# Create persistent bash history file if it doesn't exist
-touch "$BASH_HISTORY_FILE"
 
 # --- CONFIGURATION ---
 # Directories the agent can READ but not TOUCH
@@ -226,7 +251,7 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
     if [[ -n "$DEFAULT_ID_FILE" && "$ID_FILE" == "$DEFAULT_ID_FILE" ]]; then
         ID_FILE=""
     fi
-
+    
     if [ -f "$ID_FILE" ]; then
         RO_MOUNTS+=("$ID_FILE")
         echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
@@ -464,6 +489,39 @@ if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
     exit 0
 fi
 
+# If requested, discard sandbox changes (reset to real project state) and exit.
+if [[ -n $SYNC_REAL_TO_SANDBOX ]]; then
+    for proj in "${PROJECT_PATHS[@]}"; do
+        echo "--- Discarding sandbox changes for $proj ---"
+        merged=$(get_project_merged "$proj")
+        upper=$(get_project_upper "$proj")
+        work=$(get_project_work "$proj")
+
+        # Unmount if mounted
+        if is_project_mounted "$merged"; then
+            fusermount -u "$merged" 2>/dev/null || umount "$merged"
+        fi
+
+        # Delete overlay state
+        if [[ -d "$upper" ]]; then
+            echo "Removing overlay state: $upper"
+            rm -rf "$upper"
+        fi
+        if [[ -d "$work" ]]; then
+            rm -rf "$work"
+        fi
+
+        # Recreate empty directories
+        mkdir -p "$upper" "$work"
+
+        # Restore symlink
+        ensure_project_merged_symlink "$proj"
+
+        echo "Sandbox reset to match real project."
+    done
+    exit 0
+fi
+
 # Acquire locks for all projects
 if ! acquire_all_locks; then
     exit 1
@@ -570,8 +628,9 @@ done
 BWRAP_ARGS+=(--ro-bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
 echo "--- Sandbox Active: Recording to $LOG_FILE ---"
+
 # limit resources in the future
-# prlimit --as=$MEM_LIMIT --nproc=1000
+# prlimit --as=$MEM_LIMIT --nproc=1000 
 script -q -f -c "bwrap ${BWRAP_ARGS[*]} $HOME/entrypoint.sh" "$LOG_FILE"
 
 # Optional: Clean up empty log files
