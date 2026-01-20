@@ -155,8 +155,14 @@ get_project_lock() {
 
 # Session sandbox: combines all project paths for unique session identity
 # This holds shared resources: logs, entrypoint, bash_history, resolv.conf
+if [[ "${#PROJECT_PATHS[@]}" -gt 1 ]] ; then
 SESSION_HASH=$(printf '%s\n' "${PROJECT_PATHS[@]}" | sort | md5sum | head -c 6)
 SESSION_SANDBOX="$HOME/.agent_sandboxes/session_${SESSION_HASH}"
+else
+SESSION_HASH=$(echo "${PROJECT_PATHS[0]}" | md5sum | head -c 6)
+SANDBOX_ROOT="$HOME/.agent_sandboxes/$(basename "${PROJECT_PATHS[0]}")_$SESSION_HASH"
+fi
+
 
 REAL_RESOLV=$(realpath /etc/resolv.conf)
 INTERNAL_DNS_PATH=$REAL_RESOLV
