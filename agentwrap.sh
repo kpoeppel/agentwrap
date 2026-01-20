@@ -160,7 +160,7 @@ SESSION_HASH=$(printf '%s\n' "${PROJECT_PATHS[@]}" | sort | md5sum | head -c 6)
 SESSION_SANDBOX="$HOME/.agent_sandboxes/session_${SESSION_HASH}"
 else
 SESSION_HASH=$(echo "${PROJECT_PATHS[0]}" | md5sum | head -c 6)
-SANDBOX_ROOT="$HOME/.agent_sandboxes/$(basename "${PROJECT_PATHS[0]}")_$SESSION_HASH"
+SESSION_SANDBOX="$HOME/.agent_sandboxes/$(basename "${PROJECT_PATHS[0]}")_${SESSION_HASH}"
 fi
 
 
