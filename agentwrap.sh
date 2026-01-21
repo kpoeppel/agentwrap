@@ -123,6 +123,13 @@ if [[ ${#PROJECT_PATHS[@]} -eq 0 ]]; then
     exit 1
 fi
 
+for PPATH in "${PROJECT_PATHS[@]}"; do
+if [[ $PPATH == $HOME || $PPATH == "/" ]] ; then
+    echo "BAD PROJECT DIR ${PPATH}"
+    exit 1
+fi
+done
+
 # For backwards compatibility, use first project as primary (for chdir)
 PROJECT_SRC="${PROJECT_PATHS[0]}"
 
@@ -162,6 +169,85 @@ else
 SESSION_HASH=$(echo "${PROJECT_PATHS[0]}" | md5sum | head -c 6)
 SESSION_SANDBOX="$HOME/.agent_sandboxes/$(basename "${PROJECT_PATHS[0]}")_${SESSION_HASH}"
 fi
+
+# If requested, sync from the sandbox to the real project(s) and exit.
+if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
+    if [[ ! -d $SESSION_SANDBOX ]]; then
+       echo "SESSION_SANDBOX $SESSION_SANDBOX doesn't exist"
+       exit 1
+    fi
+    RSYNC_EXCLUDES=()
+    for pattern in "${SYNC_EXCLUDES[@]}"; do
+        RSYNC_EXCLUDES+=(--exclude "$pattern")
+    done
+
+    for proj in "${PROJECT_PATHS[@]}"; do
+        echo "--- Syncing sandbox view to $proj ---"
+        merged=$(get_project_merged "$proj")
+        upper=$(get_project_upper "$proj")
+        work=$(get_project_work "$proj")
+
+        MOUNTED=0
+        if ! is_project_mounted "$merged"; then
+            ensure_project_merged_dir "$proj"
+            fuse-overlayfs -o lowerdir="$proj",upperdir="$upper",workdir="$work" "$merged"
+            MOUNTED=1
+        fi
+
+        if command -v rsync >/dev/null 2>&1; then
+            rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$merged"/ "$proj"/
+        else
+            echo "rsync not found; cannot sync changes."
+        fi
+
+        if [[ $MOUNTED -eq 1 ]]; then
+            fusermount -u "$merged" 2>/dev/null || umount "$merged"
+            ensure_project_merged_symlink "$proj"
+        fi
+    done
+    exit 0
+fi
+
+# If requested, discard sandbox changes (reset to real project state) and exit.
+if [[ -n $SYNC_REAL_TO_SANDBOX ]]; then
+    if [[ ! -d $SESSION_SANDBOX ]]; then
+       echo "SESSION_SANDBOX $SESSION_SANDBOX doesn't exist"
+       exit 1
+    fi
+
+    for proj in "${PROJECT_PATHS[@]}"; do
+        echo "--- Discarding sandbox changes for $proj ---"
+        merged=$(get_project_merged "$proj")
+        upper=$(get_project_upper "$proj")
+        work=$(get_project_work "$proj")
+
+        # Unmount if mounted
+        if is_project_mounted "$merged"; then
+            fusermount -u "$merged" 2>/dev/null || umount "$merged"
+        fi
+
+        # Delete overlay state
+        if [[ -d "$upper" ]]; then
+            echo "Removing overlay state: $upper"
+            rm -rf "$upper"
+        fi
+        if [[ -d "$work" ]]; then
+            rm -rf "$work"
+        fi
+
+        # Recreate empty directories
+        mkdir -p "$upper" "$work"
+
+        # Restore symlink
+        ensure_project_merged_symlink "$proj"
+
+        echo "Sandbox reset to match real project."
+    done
+    exit 0
+fi
+
+
+
 
 
 REAL_RESOLV=$(realpath /etc/resolv.conf)
@@ -457,73 +543,6 @@ if [[ -n $CHECK_DIFF ]]; then
             fusermount -u "$merged" 2>/dev/null || umount "$merged"
             ensure_project_merged_symlink "$proj"
         fi
-    done
-    exit 0
-fi
-
-# If requested, sync from the sandbox to the real project(s) and exit.
-if [[ -n $SYNC_REAL_FROM_SANDBOX ]]; then
-    RSYNC_EXCLUDES=()
-    for pattern in "${SYNC_EXCLUDES[@]}"; do
-        RSYNC_EXCLUDES+=(--exclude "$pattern")
-    done
-
-    for proj in "${PROJECT_PATHS[@]}"; do
-        echo "--- Syncing sandbox view to $proj ---"
-        merged=$(get_project_merged "$proj")
-        upper=$(get_project_upper "$proj")
-        work=$(get_project_work "$proj")
-
-        MOUNTED=0
-        if ! is_project_mounted "$merged"; then
-            ensure_project_merged_dir "$proj"
-            fuse-overlayfs -o lowerdir="$proj",upperdir="$upper",workdir="$work" "$merged"
-            MOUNTED=1
-        fi
-
-        if command -v rsync >/dev/null 2>&1; then
-            rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$merged"/ "$proj"/
-        else
-            echo "rsync not found; cannot sync changes."
-        fi
-
-        if [[ $MOUNTED -eq 1 ]]; then
-            fusermount -u "$merged" 2>/dev/null || umount "$merged"
-            ensure_project_merged_symlink "$proj"
-        fi
-    done
-    exit 0
-fi
-
-# If requested, discard sandbox changes (reset to real project state) and exit.
-if [[ -n $SYNC_REAL_TO_SANDBOX ]]; then
-    for proj in "${PROJECT_PATHS[@]}"; do
-        echo "--- Discarding sandbox changes for $proj ---"
-        merged=$(get_project_merged "$proj")
-        upper=$(get_project_upper "$proj")
-        work=$(get_project_work "$proj")
-
-        # Unmount if mounted
-        if is_project_mounted "$merged"; then
-            fusermount -u "$merged" 2>/dev/null || umount "$merged"
-        fi
-
-        # Delete overlay state
-        if [[ -d "$upper" ]]; then
-            echo "Removing overlay state: $upper"
-            rm -rf "$upper"
-        fi
-        if [[ -d "$work" ]]; then
-            rm -rf "$work"
-        fi
-
-        # Recreate empty directories
-        mkdir -p "$upper" "$work"
-
-        # Restore symlink
-        ensure_project_merged_symlink "$proj"
-
-        echo "Sandbox reset to match real project."
     done
     exit 0
 fi
