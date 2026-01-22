@@ -160,6 +160,71 @@ get_project_lock() {
     echo "$(get_project_sandbox "$1")/lock"
 }
 
+# --- MOUNT HELPERS (per-project) ---
+is_project_mounted() {
+    local merged="$1"
+    if command -v mountpoint >/dev/null 2>&1; then
+        mountpoint -q "$merged"
+    else
+        grep -Fq " $merged " /proc/mounts
+    fi
+}
+
+
+ensure_project_merged_dir() {
+    local proj="$1"
+    local merged=$(get_project_merged "$proj")
+
+    if is_project_mounted "$merged"; then
+        return
+    fi
+    if [[ -L "$merged" ]]; then
+        if ! rm "$merged"; then
+            echo "agentwrap: failed to remove symlink at $merged."
+            exit 1
+        fi
+    elif [[ -e "$merged" && ! -d "$merged" ]]; then
+        echo "agentwrap: $merged exists and is not a directory."
+        exit 1
+    fi
+    if ! mkdir -p "$merged"; then
+        echo "agentwrap: failed to create $merged."
+        exit 1
+    fi
+    if [[ -L "$merged" ]]; then
+        echo "agentwrap: $merged is still a symlink; refusing to mount."
+        exit 1
+    fi
+}
+
+ensure_project_merged_symlink() {
+    local proj="$1"
+    local merged=$(get_project_merged "$proj")
+
+    if is_project_mounted "$merged"; then
+        return
+    fi
+    if [[ -L "$merged" ]]; then
+        return
+    fi
+    if [[ -d "$merged" ]]; then
+        if rmdir "$merged" 2>/dev/null; then
+            ln -s "$proj" "$merged"
+        else
+            echo "Warning: $merged exists and is not empty; leaving as-is."
+        fi
+        return
+    fi
+    if [[ -e "$merged" ]]; then
+        echo "Warning: $merged exists and is not a directory or symlink; leaving as-is."
+        return
+    fi
+    ln -s "$proj" "$merged"
+}
+
+
+
+
 # Session sandbox: combines all project paths for unique session identity
 # This holds shared resources: logs, entrypoint, bash_history, resolv.conf
 if [[ "${#PROJECT_PATHS[@]}" -gt 1 ]] ; then
@@ -360,66 +425,7 @@ RW_MOUNTS+=("$SSH_JAIL/config:$HOME/.ssh/config")
 
 echo "Using CONDA_PREFIX=$CONDA_PREFIX"
 
-# --- MOUNT HELPERS (per-project) ---
-is_project_mounted() {
-    local merged="$1"
-    if command -v mountpoint >/dev/null 2>&1; then
-        mountpoint -q "$merged"
-    else
-        grep -Fq " $merged " /proc/mounts
-    fi
-}
 
-ensure_project_merged_dir() {
-    local proj="$1"
-    local merged=$(get_project_merged "$proj")
-
-    if is_project_mounted "$merged"; then
-        return
-    fi
-    if [[ -L "$merged" ]]; then
-        if ! rm "$merged"; then
-            echo "agentwrap: failed to remove symlink at $merged."
-            exit 1
-        fi
-    elif [[ -e "$merged" && ! -d "$merged" ]]; then
-        echo "agentwrap: $merged exists and is not a directory."
-        exit 1
-    fi
-    if ! mkdir -p "$merged"; then
-        echo "agentwrap: failed to create $merged."
-        exit 1
-    fi
-    if [[ -L "$merged" ]]; then
-        echo "agentwrap: $merged is still a symlink; refusing to mount."
-        exit 1
-    fi
-}
-
-ensure_project_merged_symlink() {
-    local proj="$1"
-    local merged=$(get_project_merged "$proj")
-
-    if is_project_mounted "$merged"; then
-        return
-    fi
-    if [[ -L "$merged" ]]; then
-        return
-    fi
-    if [[ -d "$merged" ]]; then
-        if rmdir "$merged" 2>/dev/null; then
-            ln -s "$proj" "$merged"
-        else
-            echo "Warning: $merged exists and is not empty; leaving as-is."
-        fi
-        return
-    fi
-    if [[ -e "$merged" ]]; then
-        echo "Warning: $merged exists and is not a directory or symlink; leaving as-is."
-        return
-    fi
-    ln -s "$proj" "$merged"
-}
 
 # --- LOCKING (per-project to prevent double-mounting) ---
 check_project_lock() {
