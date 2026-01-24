@@ -380,6 +380,27 @@ chmod 700 "$SSH_JAIL"
 echo "" > "$SSH_JAIL/config"
 echo "Host *" >> "$SSH_JAIL/config"
 
+SSH_AUTH_OPTS=()
+if [[ -n $ENABLE_SSH ]] ; then
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        echo "agentwrap: SSH_AUTH_SOCK is not set; cannot forward ssh agent."
+        exit 1
+    fi
+    SSH_AUTH_SOCK_REAL=$(readlink -f "$SSH_AUTH_SOCK" 2>/dev/null || echo "$SSH_AUTH_SOCK")
+    SSH_AUTH_SOCK_DIR=$(dirname -- "$SSH_AUTH_SOCK_REAL")
+    SSH_AUTH_SOCK_FILENAME=$(basename -- "$SSH_AUTH_SOCK_REAL")
+    SSH_AUTH_SOCK_LOCK="${SSH_AUTH_SOCK_DIR}/lock.txt"
+    touch $SSH_AUTH_SOCK_LOCK
+    if [[ ! -S "$SSH_AUTH_SOCK_REAL" ]]; then
+        echo "agentwrap: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK_REAL"
+        exit 1
+    fi
+    SSH_AUTH_OPTS+=(
+        --bind "$SSH_AUTH_SOCK_DIR" "/tmp/ssh-agent-dir/"
+        --setenv SSH_AUTH_SOCK "/tmp/ssh-agent-dir/$SSH_AUTH_SOCK_FILENAME"
+    )
+fi
+
 for HOST in "${ALLOWED_HOSTS[@]}"; do
     echo "Scoping SSH access for: $HOST"
     
@@ -414,7 +435,7 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
         echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
         echo "  IdentitiesOnly yes" >> "$SSH_JAIL/config"
     else
-        echo "  IdentityAgent /tmp/ssh-agent.sock" >> "$SSH_JAIL/config"
+        echo "  IdentityAgent /tmp/ssh-agent-dir/$SSH_AUTH_SOCK_FILENAME" >> "$SSH_JAIL/config"
         echo "  IdentitiesOnly no" >> "$SSH_JAIL/config"
     fi
 done
@@ -465,6 +486,10 @@ release_all_locks() {
     for lock_file in "${LOCKS_HELD[@]}"; do
         rm -f "$lock_file"
     done
+    if [[ -n $SSH_AUTH_SOCK_LOCK ]] ; then
+    rm $SSH_AUTH_SOCK_LOCK
+    rmdir --ignore-fail-on-non-empty $(dirname $SSH_AUTH_SOCK_LOCK)
+    fi
     LOCKS_HELD=()
 }
 
@@ -598,21 +623,9 @@ for proj in "${PROJECT_PATHS[@]}"; do
     BWRAP_ARGS+=(--bind "$merged" "$proj")
 done
 
-if [[ -n $ENABLE_SSH ]] ; then
-    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
-        echo "agentwrap: SSH_AUTH_SOCK is not set; cannot forward ssh agent."
-        exit 1
-    fi
-    SSH_AUTH_SOCK_REAL=$(readlink -f "$SSH_AUTH_SOCK" 2>/dev/null || echo "$SSH_AUTH_SOCK")
-    if [[ ! -S "$SSH_AUTH_SOCK_REAL" ]]; then
-        echo "agentwrap: SSH_AUTH_SOCK is not a socket: $SSH_AUTH_SOCK_REAL"
-        exit 1
-    fi
-BWRAP_ARGS+=(
-    --bind "$SSH_AUTH_SOCK_REAL" "/tmp/ssh-agent.sock"
-    --setenv SSH_AUTH_SOCK "/tmp/ssh-agent.sock"
-)
-fi
+for SSH_AUTH_OPT in "${SSH_AUTH_OPTS[@]}"; do
+BWRAP_ARGS+=($SSH_AUTH_OPT)
+done
 
 # --- RECORDING SETUP ---
 LOG_DIR="$SESSION_SANDBOX/logs"
@@ -656,7 +669,7 @@ done
 for mapping in "${RW_MOUNTS[@]}"; do
     BWRAP_ARGS+=(--bind ${mapping%%:*} ${mapping#*:})
 done
-BWRAP_ARGS+=(--ro-bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
+BWRAP_ARGS+=(--bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
 echo "--- Sandbox Active: Recording to $LOG_FILE ---"
 
