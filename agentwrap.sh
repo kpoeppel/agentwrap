@@ -609,7 +609,9 @@ BWRAP_ARGS=(
     --share-net
     --dir $HOME/.ssh
     --die-with-parent
-    --setenv PATH "$HOME/.local/bin:$HOME/.miniconda3/bin:/usr/bin:/bin"
+    --setenv PATH "$CONDA_PREFIX/bin:$HOME/.local/bin:$HOME/.miniconda3/bin:/usr/bin:/bin"
+    --setenv CONDA_PREFIX "$CONDA_PREFIX"
+    --setenv CONDA_DEFAULT_ENV "$CONDA_DEFAULT_ENV"
     --setenv NVM_DIR "$HOME/.nvm"
     --setenv HOME "$HOME"
     --setenv AGENTWRAP_ACTIVE "1"
