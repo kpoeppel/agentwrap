@@ -403,7 +403,7 @@ fi
 
 for HOST in "${ALLOWED_HOSTS[@]}"; do
     echo "Scoping SSH access for: $HOST"
-    
+
     # 1. Get the resolved config for this host
     # 2. Filter out things we don't want (like ControlPath or local includes)
     # 3. Force BatchMode for non-interactive agents
@@ -411,14 +411,50 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
     echo "Host $HOST" >> "$SSH_JAIL/config"
     RESOLVED_CFG=$(ssh -G "$HOST")
     DEFAULT_CFG=$(ssh -G -F /dev/null "$HOST")
+
+    # Helper function to extract and compare config values
+    extract_ssh_option() {
+        local option="$1"
+        local resolved_val=$(echo "$RESOLVED_CFG" | awk -v opt="$option" '$1 == opt {for(i=2;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":""); print ""}' | tail -n 1)
+        local default_val=$(echo "$DEFAULT_CFG" | awk -v opt="$option" '$1 == opt {for(i=2;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":""); print ""}' | tail -n 1)
+
+        # Only output if different from default
+        if [[ -n "$resolved_val" && "$resolved_val" != "$default_val" ]]; then
+            echo "$resolved_val"
+        fi
+    }
+
+    # Core connection options (always include these)
     echo "$RESOLVED_CFG" | awk '$1 == "hostname" {print "  HostName " $2}' >> "$SSH_JAIL/config"
     echo "$RESOLVED_CFG" | awk '$1 == "user" {print "  User " $2}' >> "$SSH_JAIL/config"
     echo "$RESOLVED_CFG" | awk '$1 == "port" {print "  Port " $2}' >> "$SSH_JAIL/config"
-    RESOLVED_BATCHMODE=$(echo "$RESOLVED_CFG" | awk '$1 == "batchmode" {print $2}' | tail -n 1)
-    DEFAULT_BATCHMODE=$(echo "$DEFAULT_CFG" | awk '$1 == "batchmode" {print $2}' | tail -n 1)
-    if [[ -n "$RESOLVED_BATCHMODE" && "$RESOLVED_BATCHMODE" != "$DEFAULT_BATCHMODE" ]]; then
-        echo "  BatchMode $RESOLVED_BATCHMODE" >> "$SSH_JAIL/config"
-    fi
+
+    # Whitelist of additional SSH options to extract (if non-default)
+    # These are commonly needed and safe in a sandbox environment
+    SSH_OPTIONS=(
+        "batchmode:BatchMode"
+        "compression:Compression"
+        "compressionlevel:CompressionLevel"
+        "connectionattempts:ConnectionAttempts"
+        "connecttimeout:ConnectTimeout"
+        "forwardagent:ForwardAgent"
+        "proxycommand:ProxyCommand"
+        "proxyjump:ProxyJump"
+        "serveraliveinterval:ServerAliveInterval"
+        "serveralivecountmax:ServerAliveCountMax"
+        "stricthostkeychecking:StrictHostKeyChecking"
+        "tcpkeepalive:TCPKeepAlive"
+        "setenv:SetEnv"
+    )
+
+    for opt_pair in "${SSH_OPTIONS[@]}"; do
+        opt_lower="${opt_pair%%:*}"
+        opt_proper="${opt_pair#*:}"
+        opt_value=$(extract_ssh_option "$opt_lower")
+        if [[ -n "$opt_value" ]]; then
+            echo "  $opt_proper $opt_value" >> "$SSH_JAIL/config"
+        fi
+    done
 
     # 4. Extract the IdentityFile path and add it to RO_MOUNTS
     ID_FILE=$(echo "$RESOLVED_CFG" | awk '$1 == "identityfile" {print $2}' | head -n 1)
@@ -429,7 +465,7 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
     if [[ -n "$DEFAULT_ID_FILE" && "$ID_FILE" == "$DEFAULT_ID_FILE" ]]; then
         ID_FILE=""
     fi
-    
+
     if [ -f "$ID_FILE" ]; then
         RO_MOUNTS+=("$ID_FILE")
         echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
