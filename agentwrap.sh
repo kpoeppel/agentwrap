@@ -376,6 +376,13 @@ SSH_JAIL="$SESSION_SANDBOX/ssh_jail"
 mkdir -p "$SSH_JAIL"
 chmod 700 "$SSH_JAIL"
 
+# Create directory for SSH control sockets (for ControlMaster)
+# Keep on host in SESSION_SANDBOX for security, but will mount to short path in bwrap
+SSH_CONTROL_DIR="$SESSION_SANDBOX/ssh_control"
+SSH_CONTROL_DIR_SANDBOX="/tmp/ssh"  # Short path inside the sandbox
+mkdir -p "$SSH_CONTROL_DIR"
+chmod 700 "$SSH_CONTROL_DIR"
+
 # Clean old jail config
 echo "" > "$SSH_JAIL/config"
 echo "Host *" >> "$SSH_JAIL/config"
@@ -445,6 +452,8 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
         "stricthostkeychecking:StrictHostKeyChecking"
         "tcpkeepalive:TCPKeepAlive"
         "setenv:SetEnv"
+        "controlmaster:ControlMaster"
+        "controlpersist:ControlPersist"
     )
 
     for opt_pair in "${SSH_OPTIONS[@]}"; do
@@ -455,6 +464,15 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
             echo "  $opt_proper $opt_value" >> "$SSH_JAIL/config"
         fi
     done
+
+    # Special handling for ControlPath: always override to use writable directory
+    # This enables SSH connection multiplexing (ControlMaster) to work in the sandbox
+    # Use %C (hash) to keep path short and avoid "name too long" errors
+    control_master=$(extract_ssh_option "controlmaster")
+    if [[ -n "$control_master" && "$control_master" != "no" ]]; then
+        # Force ControlPath to short sandbox path with hash format
+        echo "  ControlPath $SSH_CONTROL_DIR_SANDBOX/%C" >> "$SSH_JAIL/config"
+    fi
 
     # 4. Extract the IdentityFile path and add it to RO_MOUNTS
     ID_FILE=$(echo "$RESOLVED_CFG" | awk '$1 == "identityfile" {print $2}' | head -n 1)
@@ -478,6 +496,9 @@ done
 
 # Add the synthetic config to full mounts (so the agent sees it as ~/.ssh/config)
 RW_MOUNTS+=("$SSH_JAIL/config:$HOME/.ssh/config")
+
+# Mount the SSH control directory for ControlMaster sockets to short path in sandbox
+RW_MOUNTS+=("$SSH_CONTROL_DIR:$SSH_CONTROL_DIR_SANDBOX")
 
 
 echo "Using CONDA_PREFIX=$CONDA_PREFIX"
@@ -554,6 +575,11 @@ cleanup() {
         ensure_project_merged_symlink "$proj"
     done
     release_all_locks
+
+    # Clean up SSH control directory
+    if [[ -n "${SSH_CONTROL_DIR:-}" && -d "$SSH_CONTROL_DIR" ]]; then
+        rm -rf "$SSH_CONTROL_DIR"
+    fi
 }
 
 if [[ -n "$UNLOCK_ONLY" ]]; then
