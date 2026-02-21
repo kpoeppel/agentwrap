@@ -12,6 +12,8 @@ SYNC_REAL_TO_SANDBOX=""
 CHECK_DIFF=""
 SYNC_EXCLUDES=()
 UNLOCK_ONLY=""
+ALLOW_GPU=""
+ALLOW_APPTAINER=""
 
 # --- PARSE ARGUMENTS ---
 # Parse options first (must come before project paths)
@@ -21,6 +23,14 @@ while [[ $# -gt 0 ]]; do
             ALLOWED_HOSTS+=("$2")
             ENABLE_SSH=1
             shift 2
+            ;;
+        --allow-gpu)
+            ALLOW_GPU=1
+            shift 1
+            ;;
+        --allow-apptainer)
+            ALLOW_APPTAINER=1
+            shift 1
             ;;
         --mount-home)
             RO_MOUNTS+=( "$HOME" )
@@ -62,6 +72,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --mount-rw SRC[:DEST] Mount SRC as read-write (optionally at DEST)"
             echo "  --mount-home          Mount entire home directory as read-only"
             echo "  --allow-ssh HOST      Allow SSH access to HOST"
+            echo "  --allow-gpu           Pass through NVIDIA GPU devices into sandbox"
+            echo "  --allow-apptainer     Allow Apptainer (Singularity) container execution"
             echo "  --sync-out            Sync sandbox changes to real project(s)"
             echo "  --sync-in             Discard sandbox changes (reset to real project state)"
             echo "  --check-diff          Show differences between sandbox and real project(s)"
@@ -690,6 +702,55 @@ done
 for SSH_AUTH_OPT in "${SSH_AUTH_OPTS[@]}"; do
 BWRAP_ARGS+=($SSH_AUTH_OPT)
 done
+
+# --- GPU PASSTHROUGH ---
+if [[ -n "$ALLOW_GPU" ]]; then
+    # All NVIDIA device nodes (multi-GPU: nvidia0, nvidia1, ...)
+    for dev in /dev/nvidia[0-9]* /dev/nvidiactl /dev/nvidia-modeset \
+               /dev/nvidia-uvm /dev/nvidia-uvm-tools; do
+        [[ -e "$dev" ]] && BWRAP_ARGS+=(--dev-bind "$dev" "$dev")
+    done
+    if [[ -d /dev/nvidia-caps ]]; then
+        BWRAP_ARGS+=(--dir /dev/nvidia-caps)
+        for cap in /dev/nvidia-caps/*; do
+            [[ -e "$cap" ]] && BWRAP_ARGS+=(--dev-bind "$cap" "$cap")
+        done
+    fi
+    if [[ -d /dev/dri ]]; then
+        BWRAP_ARGS+=(--dir /dev/dri)
+        for dri in /dev/dri/card* /dev/dri/renderD*; do
+            [[ -e "$dri" ]] && BWRAP_ARGS+=(--dev-bind "$dri" "$dri")
+        done
+    fi
+    # Mount CUDA toolkit libraries so apptainer --nv can find them
+    [[ -d /usr/local/cuda ]] && BWRAP_ARGS+=(--ro-bind /usr/local/cuda /usr/local/cuda)
+fi
+
+# --- APPTAINER PASSTHROUGH ---
+# Primary use-case: apptainer exec /path/to/file.sif <command>
+# Mount SIF files into the sandbox via --mount-ro. Pulling docker:// images also
+# works but is secondary; use apptainer --nv for GPU access inside containers.
+if [[ -n "$ALLOW_APPTAINER" ]]; then
+    # /dev/fuse is required for squashfuse (SIF container mounting)
+    [[ -e /dev/fuse ]] && BWRAP_ARGS+=(--dev-bind /dev/fuse /dev/fuse)
+    # Apptainer needs /var/lib/apptainer/mnt/session for per-container overlays
+    BWRAP_ARGS+=(--tmpfs /var --dir /var/tmp --dir /var/lib/apptainer/mnt/session)
+    # Share the host apptainer cache read-write so pre-pulled SIFs are accessible
+    # and any new pulls are persisted to the host cache.
+    [[ -d "$HOME/.apptainer" ]] && BWRAP_ARGS+=(--bind "$HOME/.apptainer" "$HOME/.apptainer")
+    # Host-backed tmpdir for SIF builds (bwrap's /tmp is a nodev tmpfs which
+    # blocks device node creation during OCI->SIF conversion).
+    APPTAINER_TMP="$SESSION_SANDBOX/apptainer_tmp"
+    mkdir -p "$APPTAINER_TMP"
+    BWRAP_ARGS+=(--bind "$APPTAINER_TMP" "/tmp/apptainer_build"
+                 --setenv APPTAINER_TMPDIR "/tmp/apptainer_build")
+fi
+
+# /sys (sysfs) is required by both NVML (GPU enumeration) and apptainer
+# (kernel/hardware queries during container setup). Mount once if either is active.
+if [[ -n "$ALLOW_GPU" || -n "$ALLOW_APPTAINER" ]]; then
+    BWRAP_ARGS+=(--ro-bind /sys /sys)
+fi
 
 # --- RECORDING SETUP ---
 LOG_DIR="$SESSION_SANDBOX/logs"
