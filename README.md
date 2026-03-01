@@ -48,7 +48,10 @@ If no command is provided, an interactive bash shell starts inside the sandbox. 
 #### Mount Options
 - `--mount-home`: Mount your entire home directory read-only inside the sandbox
 - `--mount-ro <path>`: Add an extra read-only mount (can be used multiple times)
+- `--mount-to-ro <src> <dest>`: Add an extra read-only mount from `src` to `dest` (can be used multiple times)
 - `--mount-rw <src[:dest]>`: Add an extra read-write mount; if `:dest` is omitted, mounts to the same path inside (can be used multiple times)
+- `--mount-to-rw <src> <dest>`: Add an extra read-write mount from `src` to `dest` (can be used multiple times)
+- `--no-mount <item>`: Skip a default mount by name or path (can be used multiple times), e.g. `.gemini` or `~/.claude`
 
 #### SSH Options
 - `--allow-ssh <host>`: Allow SSH only to the specified host (can be used multiple times for multiple hosts)
@@ -98,6 +101,16 @@ agentwrap --allow-ssh github.com ~/src/myproject
 Add read-only and read-write mounts:
 ```bash
 agentwrap --mount-ro /opt/tools --mount-rw /data:/mnt/data ~/src/myproject
+```
+
+Use explicit destination flags:
+```bash
+agentwrap --mount-to-ro /opt/tools /mnt/tools --mount-to-rw /data /mnt/data ~/src/myproject
+```
+
+Skip selected default mounts:
+```bash
+agentwrap --no-mount .gemini --no-mount ~/.claude ~/src/myproject
 ```
 
 #### Managing Changes

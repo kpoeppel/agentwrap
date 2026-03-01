@@ -7,6 +7,7 @@ PROJECT_PATHS=()
 CMD_ARGS=()
 RO_MOUNTS=()
 RW_MOUNTS=()
+NO_MOUNTS=()
 SYNC_REAL_FROM_SANDBOX=""
 SYNC_REAL_TO_SANDBOX=""
 CHECK_DIFF=""
@@ -40,8 +41,24 @@ while [[ $# -gt 0 ]]; do
             RO_MOUNTS+=( $(realpath "$2") )
             shift 2
             ;;
+        --mount-to-ro)
+            RO_MOUNTS+=( "$(realpath "$2"):$3" )
+            shift 3
+            ;;
         --mount-rw)
-            RW_MOUNTS+=( $(realpath "$2") )
+            if [[ "$2" == *:* ]]; then
+                RW_MOUNTS+=( "$(realpath "${2%%:*}"):${2#*:}" )
+            else
+                RW_MOUNTS+=( "$(realpath "$2")" )
+            fi
+            shift 2
+            ;;
+        --mount-to-rw)
+            RW_MOUNTS+=( "$(realpath "$2"):$3" )
+            shift 3
+            ;;
+        --no-mount)
+            NO_MOUNTS+=( "$2" )
             shift 2
             ;;
         --sync-out)
@@ -69,8 +86,11 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "OPTIONS (must come before project paths):"
             echo "  --mount-ro PATH       Mount PATH as read-only"
+            echo "  --mount-to-ro SRC DEST Mount SRC as read-only at DEST"
             echo "  --mount-rw SRC[:DEST] Mount SRC as read-write (optionally at DEST)"
+            echo "  --mount-to-rw SRC DEST Mount SRC as read-write at DEST"
             echo "  --mount-home          Mount entire home directory as read-only"
+            echo "  --no-mount ITEM       Skip a default mount by name/path (repeatable)"
             echo "  --allow-ssh HOST      Allow SSH access to HOST"
             echo "  --allow-gpu           Pass through NVIDIA GPU devices into sandbox"
             echo "  --allow-apptainer     Allow Apptainer (Singularity) container execution"
@@ -84,6 +104,8 @@ while [[ $# -gt 0 ]]; do
             echo "  agentwrap /project/path -- bash"
             echo "  agentwrap /project/a /project/b -- claude"
             echo "  agentwrap --mount-ro /data /project -- npm test"
+            echo "  agentwrap --mount-to-rw /data /mnt/data /project -- bash"
+            echo "  agentwrap --no-mount .gemini /project -- bash"
             echo "  agentwrap /project --check-diff"
             echo "  agentwrap /project --sync-out"
             echo "  agentwrap /project --sync-in"
@@ -334,6 +356,41 @@ BASH_HISTORY_FILE="$SESSION_SANDBOX/bash_history"
 # Track which locks we've acquired for cleanup
 LOCKS_HELD=()
 
+expand_tilde_path() {
+    local path="$1"
+    if [[ "$path" == "~" || "$path" == "~/"* ]]; then
+        echo "${path/#\~/$HOME}"
+    else
+        echo "$path"
+    fi
+}
+
+should_skip_default_mount() {
+    local entry="$1"
+    local host="${entry%%:*}"
+    local guest="${entry#*:}"
+    local host_base
+    local guest_base
+    local rule
+    local expanded_rule
+
+    if [[ "$entry" != *:* ]]; then
+        guest="$host"
+    fi
+
+    host_base=$(basename "$host")
+    guest_base=$(basename "$guest")
+
+    for rule in "${NO_MOUNTS[@]}"; do
+        expanded_rule=$(expand_tilde_path "$rule")
+        if [[ "$expanded_rule" == "$host" || "$expanded_rule" == "$guest" || "$expanded_rule" == "$host_base" || "$expanded_rule" == "$guest_base" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # Ensure session sandbox exists
 mkdir -p "$SESSION_SANDBOX"
 
@@ -348,7 +405,7 @@ done
 
 # --- CONFIGURATION ---
 # Directories the agent can READ but not TOUCH
-RO_MOUNTS+=(
+DEFAULT_RO_MOUNTS=(
     "/usr" "/bin" "/lib" "/lib64"
     "$HOME/.nvm"
     "$HOME/.miniconda3"
@@ -359,7 +416,7 @@ RO_MOUNTS+=(
 
 # Directories the agent has FULL autonomy over
 # Note: $MERGED is handled separately as the project root
-RW_MOUNTS+=(
+DEFAULT_RW_MOUNTS=(
     "$HOME/.cache:$HOME/.cache"
     "$HOME/.gemini"
     "$HOME/.codex"
@@ -367,6 +424,20 @@ RW_MOUNTS+=(
     "$HOME/.claude.json"
     "$BASH_HISTORY_FILE:$HOME/.bash_history"
 )
+
+for mount in "${DEFAULT_RO_MOUNTS[@]}"; do
+    if should_skip_default_mount "$mount"; then
+        continue
+    fi
+    RO_MOUNTS+=("$mount")
+done
+
+for mount in "${DEFAULT_RW_MOUNTS[@]}"; do
+    if should_skip_default_mount "$mount"; then
+        continue
+    fi
+    RW_MOUNTS+=("$mount")
+done
 # ---------------------
 
 # --- STABLE DNS SETUP ---
@@ -786,13 +857,21 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$LOG_DIR/session_$TIMESTAMP.log"
 
 # Add Read-Only Mounts
-for dir in "${RO_MOUNTS[@]}"; do
-    BWRAP_ARGS+=(--ro-bind "$dir" "$dir")
+for mapping in "${RO_MOUNTS[@]}"; do
+    if [[ "$mapping" == *:* ]]; then
+        BWRAP_ARGS+=(--ro-bind "${mapping%%:*}" "${mapping#*:}")
+    else
+        BWRAP_ARGS+=(--ro-bind "$mapping" "$mapping")
+    fi
 done
 
 # Add Read-Write Mounts (handling the host:guest mapping)
 for mapping in "${RW_MOUNTS[@]}"; do
-    BWRAP_ARGS+=(--bind ${mapping%%:*} ${mapping#*:})
+    if [[ "$mapping" == *:* ]]; then
+        BWRAP_ARGS+=(--bind "${mapping%%:*}" "${mapping#*:}")
+    else
+        BWRAP_ARGS+=(--bind "$mapping" "$mapping")
+    fi
 done
 BWRAP_ARGS+=(--bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
