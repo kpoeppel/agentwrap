@@ -420,6 +420,7 @@ DEFAULT_RW_MOUNTS=(
     "$HOME/.cache:$HOME/.cache"
     "$HOME/.gemini"
     "$HOME/.codex"
+    "$HOME/.local/share/opencode"
     "$HOME/.claude"
     "$HOME/.claude.json"
     "$BASH_HISTORY_FILE:$HOME/.bash_history"
@@ -521,6 +522,7 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
     # Whitelist of additional SSH options to extract (if non-default)
     # These are commonly needed and safe in a sandbox environment
     SSH_OPTIONS=(
+        "port:Port"
         "batchmode:BatchMode"
         "compression:Compression"
         "compressionlevel:CompressionLevel"
