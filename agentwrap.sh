@@ -517,7 +517,6 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
     # Core connection options (always include these)
     echo "$RESOLVED_CFG" | awk '$1 == "hostname" {print "  HostName " $2}' >> "$SSH_JAIL/config"
     echo "$RESOLVED_CFG" | awk '$1 == "user" {print "  User " $2}' >> "$SSH_JAIL/config"
-    echo "$RESOLVED_CFG" | awk '$1 == "port" {print "  Port " $2}' >> "$SSH_JAIL/config"
 
     # Whitelist of additional SSH options to extract (if non-default)
     # These are commonly needed and safe in a sandbox environment
