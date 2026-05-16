@@ -422,6 +422,7 @@ DEFAULT_RW_MOUNTS=(
     "$HOME/.codex"
     "$HOME/.local/share/opencode"
     "$HOME/.claude"
+    "$HOME/.pi"
     "$HOME/.claude.json"
     "$BASH_HISTORY_FILE:$HOME/.bash_history"
 )

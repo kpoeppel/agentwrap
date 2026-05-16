@@ -1,6 +1,7 @@
 # agentwrap
 
 High-security, low-overhead sandbox wrapper for running AI agents in a disposable overlay of real project directories. It creates per-project overlayfs mounts, isolates the environment with bubblewrap, and records each session.
+Supports the standard directories of claude code, codex, opencode and pi out of the box. (Edit if you want to leave some out).
 
 ## Features
 
