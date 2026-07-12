@@ -20,6 +20,9 @@ SYNC_EXCLUDES=()
 UNLOCK_ONLY=""
 ALLOW_GPU=""
 ALLOW_APPTAINER=""
+ALLOW_FLATPAK=""
+CLEARENV=""
+SETENV_ARGS=()
 
 # --- PARSE ARGUMENTS ---
 # Parse options first (must come before project paths)
@@ -37,6 +40,22 @@ while [[ $# -gt 0 ]]; do
         --allow-apptainer)
             ALLOW_APPTAINER=1
             shift 1
+            ;;
+        --allow-flatpak)
+            ALLOW_FLATPAK=1
+            shift 1
+            ;;
+        --clearenv)
+            CLEARENV=1
+            shift 1
+            ;;
+        --setenv)
+            if [[ $# -lt 3 ]]; then
+                echo "agentwrap: --setenv requires VAR and VALUE arguments."
+                exit 1
+            fi
+            SETENV_ARGS+=(--setenv "$2" "$3")
+            shift 3
             ;;
         --mount-home)
             RO_MOUNTS+=( "$HOME" )
@@ -99,11 +118,24 @@ while [[ $# -gt 0 ]]; do
             echo "  --allow-ssh HOST      Allow SSH access to HOST"
             echo "  --allow-gpu           Pass through NVIDIA GPU devices into sandbox"
             echo "  --allow-apptainer     Allow Apptainer (Singularity) container execution"
+            echo "  --allow-flatpak       Pass through flatpak runtime dirs and session bus"
+            echo "  --clearenv            Start from an empty environment inside the sandbox"
+            echo "                        (built-in vars like PATH/HOME are still set)"
+            echo "  --setenv VAR VALUE    Set VAR=VALUE inside the sandbox (repeatable)"
             echo "  --sync-out            Sync sandbox changes to real project(s)"
             echo "  --sync-in             Discard sandbox changes (reset to real project state)"
             echo "  --check-diff          Show differences between sandbox and real project(s)"
             echo "  --sync-exclude PATH   Exclude PATH from sync operations"
             echo "  --unlock              Clear stale lock(s) for the specified project(s)"
+            echo ""
+            echo "CONFIG FILE (~/.agent_sandboxes/config):"
+            echo "  Optional bash file sourced at startup to extend default mounts,"
+            echo "  e.g. for standard paths you always need:"
+            echo "      SANDBOX_RO_MOUNTS=(\"\$HOME/.cargo\")"
+            echo "      SANDBOX_RW_MOUNTS=(\"\$HOME/.config/myagent\")"
+            echo "      SANDBOX_NO_MOUNTS=(.gemini)"
+            echo "  Entries support SRC or SRC:DEST like --mount-ro/--mount-rw;"
+            echo "  command-line --no-mount also applies to config entries."
             echo ""
             echo "EXAMPLES:"
             echo "  agentwrap /project/path -- bash"
@@ -431,6 +463,23 @@ DEFAULT_RW_MOUNTS=(
     "$HOME/.claude.json"
     "$BASH_HISTORY_FILE:$HOME/.bash_history"
 )
+
+# --- USER MOUNT CONFIG ---
+# Optional bash-sourced config extending the default mount lists, so standard
+# paths don't need to be repeated on every command line. Recognized arrays:
+#   SANDBOX_RO_MOUNTS=(...)  extra read-only mounts (SRC or SRC:DEST)
+#   SANDBOX_RW_MOUNTS=(...)  extra read-write mounts (SRC or SRC:DEST)
+#   SANDBOX_NO_MOUNTS=(...)  default mounts to skip (same matching as --no-mount)
+MOUNT_CONFIG="$HOME/.agent_sandboxes/config"
+if [[ -f "$MOUNT_CONFIG" ]]; then
+    SANDBOX_RO_MOUNTS=()
+    SANDBOX_RW_MOUNTS=()
+    SANDBOX_NO_MOUNTS=()
+    source "$MOUNT_CONFIG"
+    DEFAULT_RO_MOUNTS+=("${SANDBOX_RO_MOUNTS[@]}")
+    DEFAULT_RW_MOUNTS+=("${SANDBOX_RW_MOUNTS[@]}")
+    NO_MOUNTS+=("${SANDBOX_NO_MOUNTS[@]}")
+fi
 
 for mount in "${DEFAULT_RO_MOUNTS[@]}"; do
     if should_skip_default_mount "$mount"; then
@@ -771,6 +820,12 @@ BWRAP_ARGS=(
     --ro-bind "$AGENT_RESOLV" "$INTERNAL_DNS_PATH"
 )
 
+# --clearenv must precede the built-in --setenv calls above, so prepend it;
+# bwrap applies env options in command-line order.
+if [[ -n "$CLEARENV" ]]; then
+    BWRAP_ARGS=(--clearenv "${BWRAP_ARGS[@]}")
+fi
+
 # Add bind mounts for all project overlays
 for proj in "${PROJECT_PATHS[@]}"; do
     merged=$(get_project_merged "$proj")
@@ -824,9 +879,28 @@ if [[ -n "$ALLOW_APPTAINER" ]]; then
                  --setenv APPTAINER_TMPDIR "/tmp/apptainer_build")
 fi
 
-# /sys (sysfs) is required by both NVML (GPU enumeration) and apptainer
-# (kernel/hardware queries during container setup). Mount once if either is active.
-if [[ -n "$ALLOW_GPU" || -n "$ALLOW_APPTAINER" ]]; then
+# --- FLATPAK PASSTHROUGH ---
+# Passes through the per-user flatpak runtime state and the D-Bus session bus
+# so flatpak and portal-based tools work inside the sandbox.
+if [[ -n "$ALLOW_FLATPAK" ]]; then
+    XDG_RUNTIME_HOST="/run/user/$(id -u)"
+    for item in .flatpak .flatpak-cache .flatpak-helper bus doc; do
+        [[ -e "$XDG_RUNTIME_HOST/$item" ]] && \
+            BWRAP_ARGS+=(--bind "$XDG_RUNTIME_HOST/$item" "$XDG_RUNTIME_HOST/$item")
+    done
+    BWRAP_ARGS+=(--setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_HOST"
+                 --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=$XDG_RUNTIME_HOST/bus")
+fi
+
+# User-supplied --setenv values go last so they override built-in and
+# mode-specific (e.g. flatpak) env settings.
+if [[ ${#SETENV_ARGS[@]} -gt 0 ]]; then
+    BWRAP_ARGS+=("${SETENV_ARGS[@]}")
+fi
+
+# /sys (sysfs) is required by NVML (GPU enumeration), apptainer and flatpak
+# (kernel/hardware queries during container setup). Mount once if any is active.
+if [[ -n "$ALLOW_GPU" || -n "$ALLOW_APPTAINER" || -n "$ALLOW_FLATPAK" ]]; then
     BWRAP_ARGS+=(--ro-bind /sys /sys)
 fi
 
@@ -887,8 +961,11 @@ echo "--- Sandbox Active: Recording to $LOG_FILE ---"
 echo "${BWRAP_ARGS[*]}"
 
 # limit resources in the future
-# prlimit --as=$MEM_LIMIT --nproc=1000 
-script -q -f -c "bwrap ${BWRAP_ARGS[*]} $HOME/entrypoint.sh" "$LOG_FILE"
+# prlimit --as=$MEM_LIMIT --nproc=1000
+# %q-quote each arg so values with spaces or empty strings survive the
+# flattening into the shell command string that 'script' executes.
+BWRAP_CMD="bwrap $(printf "%q " "${BWRAP_ARGS[@]}") $HOME/entrypoint.sh"
+script -q -f -c "$BWRAP_CMD" "$LOG_FILE"
 
 # Optional: Clean up empty log files
 [ ! -s "$LOG_FILE" ] && rm "$LOG_FILE"

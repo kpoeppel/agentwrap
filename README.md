@@ -57,6 +57,16 @@ If no command is provided, an interactive bash shell starts inside the sandbox. 
 #### SSH Options
 - `--allow-ssh <host>`: Allow SSH only to the specified host (can be used multiple times for multiple hosts)
 
+#### Passthrough Options
+- `--allow-gpu`: Pass NVIDIA GPU devices (and `/sys`, CUDA libraries) into the sandbox
+- `--allow-apptainer`: Enable Apptainer (Singularity) container execution inside the sandbox
+- `--allow-flatpak`: Pass through the per-user flatpak runtime dirs (`/run/user/$UID/{.flatpak,.flatpak-cache,.flatpak-helper,bus,doc}`), mount `/sys`, and set `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`
+
+#### Environment Options
+By default the sandbox **inherits the full host environment** (including any secrets exported in your shell); the sandbox only overrides a few variables like `PATH` and `HOME`.
+- `--clearenv`: Start from an empty environment instead (passed through to bwrap; built-in variables like `PATH`/`HOME` are still set)
+- `--setenv <var> <value>`: Set a variable inside the sandbox (bwrap syntax, can be used multiple times; applied last, so it overrides everything else). Tip: with `--clearenv`, add `--setenv TERM "$TERM"` for interactive TUIs.
+
 #### Sync & Diff Options
 - `--sync-out`: Copy the merged sandbox view back into the real project(s) and exit (uses `rsync`)
 - `--sync-in`: Discard all sandbox changes and reset to match the real project(s) (deletes overlay state)
@@ -66,6 +76,19 @@ If no command is provided, an interactive bash shell starts inside the sandbox. 
 #### Utility Options
 - `--unlock`: Remove stale lock file(s) for the specified project(s) and exit
 - `--help`: Show usage information
+
+### Configuration file (`~/.agent_sandboxes/config`)
+
+Optional bash file sourced at startup to extend the default mount lists, so standard paths don't have to be repeated on every command line:
+
+```bash
+# ~/.agent_sandboxes/config
+SANDBOX_RO_MOUNTS=("$HOME/.cargo" "$HOME/.rustup")   # extra read-only mounts
+SANDBOX_RW_MOUNTS=("$HOME/.config/myagent")          # extra read-write mounts
+SANDBOX_NO_MOUNTS=(.gemini .codex)                   # default mounts to skip
+```
+
+Entries support `SRC` or `SRC:DEST` mapping like `--mount-ro`/`--mount-rw`. Command-line `--no-mount` also applies to config entries.
 
 ### Examples
 

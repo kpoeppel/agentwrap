@@ -1,6 +1,7 @@
 #!/bin/bash
-# Run GPU and Apptainer tests both outside and inside the sandbox,
-# comparing default (restricted) vs. --allow-gpu / --allow-apptainer.
+# Run GPU, Apptainer and Flatpak tests both outside and inside the sandbox,
+# comparing default (restricted) vs. --allow-gpu / --allow-apptainer /
+# --allow-flatpak, plus self-contained env/config assertion tests.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -37,17 +38,41 @@ apptainer exec docker://alpine:latest cat /etc/os-release 2>&1 | head -6
 echo "=== END Apptainer Test ==="
 '
 
+FLATPAK_TEST='
+echo "=== Flatpak Access Test ==="
+UID_NUM=$(id -u)
+echo "--- runtime dirs under /run/user/$UID_NUM ---"
+for item in .flatpak .flatpak-cache .flatpak-helper bus doc; do
+    ls -ld "/run/user/$UID_NUM/$item" 2>&1
+done
+echo "--- /sys ---"
+ls /sys 2>&1 | head -3
+echo "--- env ---"
+echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-<unset>}"
+echo "--- dbus session ping ---"
+dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames 2>&1 | head -5
+echo "--- flatpak ---"
+flatpak --version 2>&1
+flatpak list 2>&1 | head -5
+echo "=== END Flatpak Test ==="
+'
+
 sep() { echo ""; echo "============================================"; echo "  $*"; echo "============================================"; echo ""; }
 
 sep "BASELINE: outside sandbox"
 eval "$GPU_TEST"
 echo ""
 eval "$APPTAINER_TEST"
+echo ""
+eval "$FLATPAK_TEST"
 
 sep "SANDBOX (default — no GPU/Apptainer flags)"
 bash "$AGENTWRAP" "$TEST_PROJECT" -- bash -c "$GPU_TEST"
 bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
 bash "$AGENTWRAP" "$TEST_PROJECT" -- bash -c "$APPTAINER_TEST"
+bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
+bash "$AGENTWRAP" "$TEST_PROJECT" -- bash -c "$FLATPAK_TEST"
 bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
 
 sep "SANDBOX with --allow-gpu"
@@ -57,6 +82,13 @@ bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
 sep "SANDBOX with --allow-apptainer"
 bash "$AGENTWRAP" --allow-apptainer "$TEST_PROJECT" -- bash -c "$APPTAINER_TEST"
 bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
+
+sep "SANDBOX with --allow-flatpak"
+bash "$AGENTWRAP" --allow-flatpak "$TEST_PROJECT" -- bash -c "$FLATPAK_TEST"
+bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
+
+sep "ENV / CONFIG ASSERTION TESTS"
+bash "$SCRIPT_DIR/test_env_config.sh"
 
 sep "CLEANUP"
 rm -rf "$TEST_PROJECT"
