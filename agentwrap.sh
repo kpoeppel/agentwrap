@@ -2,6 +2,11 @@
 # agentwrap.sh - A high-security, low-overhead sandbox for AI agents
 AGENT_CONFIG="$HOME/.agent_sandboxes/sandbox_profile"
 
+if [[ ! -f "$AGENT_CONFIG" ]]
+then
+   echo "Please set up your general sandbox profile in $AGENT_CONFIG."
+fi
+
 ALLOWED_HOSTS=()
 PROJECT_PATHS=()
 CMD_ARGS=()
@@ -878,6 +883,8 @@ done
 BWRAP_ARGS+=(--bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
 echo "--- Sandbox Active: Recording to $LOG_FILE ---"
+
+echo "${BWRAP_ARGS[*]}"
 
 # limit resources in the future
 # prlimit --as=$MEM_LIMIT --nproc=1000 
