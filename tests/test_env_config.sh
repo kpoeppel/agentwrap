@@ -26,13 +26,15 @@ STUB_BIN="$TEST_ROOT/stub_bin"
 cleanup() { rm -rf "$TEST_ROOT"; }
 trap cleanup EXIT
 
-# The fake HOME must contain everything the default mount lists reference,
-# since bwrap fails hard on missing bind sources.
-mkdir -p "$FAKE_HOME/.agent_sandboxes" "$FAKE_HOME/.nvm" "$FAKE_HOME/.miniconda3" \
+# The fake HOME deliberately omits two paths from the generated config template
+# ($HOME/.pi and $HOME/.miniconda3) to prove they are skipped instead of
+# failing the sandbox, which is what bwrap does on a missing bind source.
+mkdir -p "$FAKE_HOME/.agent_sandboxes" "$FAKE_HOME/.nvm" \
          "$FAKE_HOME/.local/share/opencode" "$FAKE_HOME/.cache" "$FAKE_HOME/.gemini" \
-         "$FAKE_HOME/.codex" "$FAKE_HOME/.claude" "$FAKE_HOME/.pi" "$FAKE_HOME/.ssh"
+         "$FAKE_HOME/.codex" "$FAKE_HOME/.claude" "$FAKE_HOME/.ssh"
 touch "$FAKE_HOME/.gitconfig" "$FAKE_HOME/.ssh/known_hosts" "$FAKE_HOME/.claude.json"
 echo "# test profile" > "$FAKE_HOME/.agent_sandboxes/sandbox_profile"
+MOUNT_CONFIG="$FAKE_HOME/.agent_sandboxes/config"
 
 mkdir -p "$PROJECT" "$EXTRA_RO" "$EXTRA_RW"
 echo "ro-content" > "$EXTRA_RO/marker.txt"
@@ -92,6 +94,70 @@ dry_run() {
         bash "$AGENTWRAP" "$@" 2>/dev/null | grep '^bwrap ' | tail -1
 }
 
+dry_run_all() {
+    # Returns everything the run printed, stderr included.
+    env -u AGENTWRAP_ACTIVE HOME="$FAKE_HOME" PATH="$STUB_BIN:$PATH" \
+        bash "$AGENTWRAP" "$@" 2>&1
+}
+
+# --- mount config bootstrap (must run before anything creates the config) ---
+[ -e "$MOUNT_CONFIG" ] && { echo "FAIL: test setup left a config behind"; exit 1; }
+
+OUT=$(dry_run_all "$PROJECT" -- true)
+check "first run reports writing the default config" \
+    "wrote default mount config to $MOUNT_CONFIG" "$OUT"
+if [ -f "$MOUNT_CONFIG" ]; then
+    echo "PASS: first run created $MOUNT_CONFIG"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: first run did not create $MOUNT_CONFIG"
+    FAIL=$((FAIL + 1))
+fi
+check "generated config carries the version marker" \
+    "^# agentwrap config v1$" "$(cat "$MOUNT_CONFIG")"
+check "generated config lists the agent state dirs" \
+    '"\$HOME/.claude"' "$(cat "$MOUNT_CONFIG")"
+check_absent "generated config leaves system paths to the script" \
+    '"/usr"' "$(cat "$MOUNT_CONFIG")"
+
+CMD=$(dry_run "$PROJECT" -- true)
+check "built-in system mounts are applied" "--ro-bind /usr /usr" "$CMD"
+check "generated config RO entry is applied" \
+    "--ro-bind $FAKE_HOME/.nvm $FAKE_HOME/.nvm" "$CMD"
+check "generated config RW entry is applied" \
+    "--bind $FAKE_HOME/.claude $FAKE_HOME/.claude" "$CMD"
+check "bash history is bound from the session sandbox" \
+    "--bind $FAKE_HOME/.agent_sandboxes/.*bash_history $FAKE_HOME/.bash_history" "$CMD"
+
+# Missing sources must not reach bwrap (it fails hard on them).
+OUT=$(dry_run_all "$PROJECT" -- true)
+check "missing config source is reported" \
+    "skipping read-write mount, no such path: $FAKE_HOME/.pi" "$OUT"
+check_absent "missing config source is not passed to bwrap" \
+    "--bind $FAKE_HOME/.pi" "$CMD"
+check_absent "missing RO config source is not passed to bwrap" \
+    "--ro-bind $FAKE_HOME/.miniconda3" "$CMD"
+
+OUT=$(dry_run_all --print-config)
+check "--print-config prints the template" "^SANDBOX_RW_MOUNTS=(" "$OUT"
+check_absent "--print-config needs no project path" "no project path specified" "$OUT"
+
+# A config predating the version marker gets a migration hint.
+cp "$MOUNT_CONFIG" "$TEST_ROOT/config.generated"
+grep -v '^# agentwrap config v' "$TEST_ROOT/config.generated" > "$MOUNT_CONFIG"
+OUT=$(dry_run_all "$PROJECT" -- true)
+check "config without version marker warns about the changed semantics" \
+    "has no version marker" "$OUT"
+cp "$TEST_ROOT/config.generated" "$MOUNT_CONFIG"
+OUT=$(dry_run_all "$PROJECT" -- true)
+check_absent "marked config does not warn" "has no version marker" "$OUT"
+
+OUT=$(dry_run_all --mount-ro "$TEST_ROOT/does_not_exist" "$PROJECT" -- true)
+check "--mount-ro with a missing path is a hard error" \
+    "no such path: $TEST_ROOT/does_not_exist" "$OUT"
+check_absent "--mount-ro with a missing path does not build a bwrap command" \
+    "^bwrap " "$OUT"
+
 CMD=$(dry_run --clearenv "$PROJECT" -- true)
 check "--clearenv is passed to bwrap, before built-in setenvs" \
     "^bwrap --clearenv --proc" "$CMD"
@@ -115,21 +181,31 @@ else
     echo "SKIP: session bus bind check (/run/user/$(id -u)/bus not present on this host)"
 fi
 
-cat > "$FAKE_HOME/.agent_sandboxes/config" <<EOF
+cat > "$MOUNT_CONFIG" <<EOF
+# agentwrap config v1
 SANDBOX_RO_MOUNTS=("$EXTRA_RO:$FAKE_HOME/mnt_ro")
-SANDBOX_RW_MOUNTS=("$EXTRA_RW:$FAKE_HOME/mnt_rw")
+SANDBOX_RW_MOUNTS=("$EXTRA_RW:$FAKE_HOME/mnt_rw" "\$HOME/.gemini")
 SANDBOX_NO_MOUNTS=(.gemini)
 EOF
 CMD=$(dry_run "$PROJECT" -- true)
 check "config file adds RO mount" "--ro-bind $EXTRA_RO $FAKE_HOME/mnt_ro" "$CMD"
 check "config file adds RW mount" "--bind $EXTRA_RW $FAKE_HOME/mnt_rw" "$CMD"
-check_absent "config SANDBOX_NO_MOUNTS skips default .gemini mount" \
-    "$FAKE_HOME/.gemini" "$CMD"
+check "config replaces rather than extends the \$HOME defaults" \
+    "^bwrap .*--ro-bind /usr /usr" "$CMD"
+check_absent "config without .claude drops the default .claude mount" \
+    "--bind $FAKE_HOME/.claude " "$CMD"
+check_absent "config SANDBOX_NO_MOUNTS skips a config entry" \
+    "--bind $FAKE_HOME/.gemini" "$CMD"
 
 CMD=$(dry_run --no-mount mnt_ro "$PROJECT" -- true)
 check_absent "command-line --no-mount skips a config entry" \
     "$FAKE_HOME/mnt_ro" "$CMD"
-rm -f "$FAKE_HOME/.agent_sandboxes/config"
+
+CMD=$(dry_run --mount-rw "$EXTRA_RW:$FAKE_HOME/mnt_rw" "$PROJECT" -- true)
+check "command-line mounts are applied after config ones (last bind wins)" \
+    "--bind $EXTRA_RW $FAKE_HOME/mnt_rw .*--bind $EXTRA_RW $FAKE_HOME/mnt_rw" "$CMD"
+
+rm -f "$MOUNT_CONFIG"
 
 OUT=$(HOME="$FAKE_HOME" bash "$AGENTWRAP" --setenv FOO 2>&1)
 check "--setenv without VALUE errors out" "requires VAR and VALUE" "$OUT"
@@ -174,9 +250,20 @@ else
     OUT=$(run_sandboxed --clearenv --setenv ONLYME yes "$PROJECT" -- env)
     check "--setenv works together with --clearenv" "^ONLYME=yes$" "$OUT"
 
-    cat > "$FAKE_HOME/.agent_sandboxes/config" <<EOF
+    # The generated config still applies here; $HOME/.pi and $HOME/.miniconda3
+    # are missing from the fake home, so this also proves the sandbox starts
+    # despite them instead of dying in bwrap.
+    OUT=$(run_sandboxed "$PROJECT" -- bash -c '
+        [ -e "$HOME/.claude" ] && echo CLAUDE_PRESENT || echo CLAUDE_MISSING
+        [ -e "$HOME/.pi" ] && echo PI_PRESENT || echo PI_MISSING
+    ')
+    check "generated config mounts agent state" "^CLAUDE_PRESENT$" "$OUT"
+    check "missing config entry is skipped, sandbox still starts" "^PI_MISSING$" "$OUT"
+
+    cat > "$MOUNT_CONFIG" <<EOF
+# agentwrap config v1
 SANDBOX_RO_MOUNTS=("$EXTRA_RO:$FAKE_HOME/mnt_ro")
-SANDBOX_RW_MOUNTS=("$EXTRA_RW:$FAKE_HOME/mnt_rw")
+SANDBOX_RW_MOUNTS=("$EXTRA_RW:$FAKE_HOME/mnt_rw" "\$HOME/.gemini")
 SANDBOX_NO_MOUNTS=(.gemini)
 EOF
     OUT=$(run_sandboxed "$PROJECT" -- bash -c '
@@ -184,11 +271,13 @@ EOF
         (echo w > "$HOME/mnt_ro/write_attempt") 2>/dev/null && echo RO_WRITABLE || echo RO_BLOCKED
         (echo w > "$HOME/mnt_rw/new.txt") 2>/dev/null && echo RW_OK || echo RW_BLOCKED
         [ -e "$HOME/.gemini" ] && echo GEMINI_PRESENT || echo GEMINI_SKIPPED
+        [ -e "$HOME/.claude" ] && echo CLAUDE_PRESENT || echo CLAUDE_MISSING
     ')
     check "config RO mount is visible at mapped dest" "^ro-content$" "$OUT"
     check "config RO mount rejects writes" "^RO_BLOCKED$" "$OUT"
     check "config RW mount accepts writes" "^RW_OK$" "$OUT"
-    check "config SANDBOX_NO_MOUNTS skips a default mount" "^GEMINI_SKIPPED$" "$OUT"
+    check "config SANDBOX_NO_MOUNTS skips a config entry" "^GEMINI_SKIPPED$" "$OUT"
+    check "config replaces the built-in \$HOME defaults" "^CLAUDE_MISSING$" "$OUT"
 
     if [ -f "$EXTRA_RW/new.txt" ]; then
         echo "PASS: config RW mount write reached the host directory"
@@ -197,7 +286,7 @@ EOF
         echo "FAIL: config RW mount write did not reach the host directory"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$FAKE_HOME/.agent_sandboxes/config"
+    rm -f "$MOUNT_CONFIG"
 fi
 
 echo ""

@@ -1,17 +1,77 @@
 #!/bin/bash
 # agentwrap.sh - A high-security, low-overhead sandbox for AI agents
 AGENT_CONFIG="$HOME/.agent_sandboxes/sandbox_profile"
+MOUNT_CONFIG="$HOME/.agent_sandboxes/config"
 
 if [[ ! -f "$AGENT_CONFIG" ]]
 then
    echo "Please set up your general sandbox profile in $AGENT_CONFIG."
 fi
 
+# Template for the user mount config. Written to $MOUNT_CONFIG on first run and
+# dumped by --print-config; this heredoc is the only definition of the
+# user-tier default mounts.
+print_default_config() {
+    cat <<'EOF'
+# agentwrap config v1
+#
+# Mount defaults for agentwrap. Sourced as bash, so $HOME and other variables
+# expand and conditionals work. Entries are either SRC (mounted at the same
+# path inside the sandbox) or SRC:DEST.
+#
+# These arrays replace the built-in $HOME defaults. System paths (/usr, /bin,
+# /lib, /lib64, /etc) and session state (bash history, ssh jail) stay in the
+# script. Missing sources are skipped with a warning, so listing an agent you
+# have not installed is harmless.
+#
+# Reprint this template with: agentwrap --print-config
+
+# Read-only: toolchains and identity the agent may read but not modify.
+SANDBOX_RO_MOUNTS=(
+    "$HOME/.nvm"
+    "$HOME/.miniconda3"
+    "$HOME/.local"
+    "$HOME/.gitconfig"
+    "$HOME/.ssh/known_hosts"
+)
+
+# Read-write: agent state that has to survive the sandbox.
+# Applied after the read-only list, so more specific paths win.
+SANDBOX_RW_MOUNTS=(
+    "$HOME/.cache"
+    "$HOME/.claude"
+    "$HOME/.claude.json"
+    "$HOME/.codex"
+    "$HOME/.gemini"
+    "$HOME/.pi"
+    "$HOME/.local/share/opencode"
+)
+
+# Entries to drop from the lists above, matched by basename or full path
+# (same as the --no-mount option).
+SANDBOX_NO_MOUNTS=()
+EOF
+}
+
+resolve_mount_src() {
+    # Resolve a command-line mount source. Unlike config entries these are
+    # explicit requests, so a missing path is an error rather than a skip.
+    local raw="$1" opt="$2" resolved
+    resolved=$(realpath -- "$raw" 2>/dev/null)
+    if [[ -z "$resolved" || ! -e "$resolved" ]]; then
+        echo "agentwrap: $opt: no such path: $raw" >&2
+        return 1
+    fi
+    printf '%s' "$resolved"
+}
+
 ALLOWED_HOSTS=()
 PROJECT_PATHS=()
 CMD_ARGS=()
 RO_MOUNTS=()
 RW_MOUNTS=()
+CLI_RO_MOUNTS=()
+CLI_RW_MOUNTS=()
 NO_MOUNTS=()
 SYNC_REAL_FROM_SANDBOX=""
 SYNC_REAL_TO_SANDBOX=""
@@ -58,27 +118,32 @@ while [[ $# -gt 0 ]]; do
             shift 3
             ;;
         --mount-home)
-            RO_MOUNTS+=( "$HOME" )
+            CLI_RO_MOUNTS+=( "$HOME" )
             shift 1
             ;;
         --mount-ro)
-            RO_MOUNTS+=( $(realpath "$2") )
+            MOUNT_SRC=$(resolve_mount_src "$2" "$1") || exit 1
+            CLI_RO_MOUNTS+=( "$MOUNT_SRC" )
             shift 2
             ;;
         --mount-to-ro)
-            RO_MOUNTS+=( "$(realpath "$2"):$3" )
+            MOUNT_SRC=$(resolve_mount_src "$2" "$1") || exit 1
+            CLI_RO_MOUNTS+=( "$MOUNT_SRC:$3" )
             shift 3
             ;;
         --mount-rw)
             if [[ "$2" == *:* ]]; then
-                RW_MOUNTS+=( "$(realpath "${2%%:*}"):${2#*:}" )
+                MOUNT_SRC=$(resolve_mount_src "${2%%:*}" "$1") || exit 1
+                CLI_RW_MOUNTS+=( "$MOUNT_SRC:${2#*:}" )
             else
-                RW_MOUNTS+=( "$(realpath "$2")" )
+                MOUNT_SRC=$(resolve_mount_src "$2" "$1") || exit 1
+                CLI_RW_MOUNTS+=( "$MOUNT_SRC" )
             fi
             shift 2
             ;;
         --mount-to-rw)
-            RW_MOUNTS+=( "$(realpath "$2"):$3" )
+            MOUNT_SRC=$(resolve_mount_src "$2" "$1") || exit 1
+            CLI_RW_MOUNTS+=( "$MOUNT_SRC:$3" )
             shift 3
             ;;
         --no-mount)
@@ -105,6 +170,10 @@ while [[ $# -gt 0 ]]; do
             SYNC_EXCLUDES+=("$2")
             shift 2
             ;;
+        --print-config)
+            print_default_config
+            exit 0
+            ;;
         --help)
             echo "USAGE: agentwrap [OPTIONS] /path1 [/path2 ...] [-- command...]"
             echo ""
@@ -127,15 +196,18 @@ while [[ $# -gt 0 ]]; do
             echo "  --check-diff          Show differences between sandbox and real project(s)"
             echo "  --sync-exclude PATH   Exclude PATH from sync operations"
             echo "  --unlock              Clear stale lock(s) for the specified project(s)"
+            echo "  --print-config        Print the default mount config template and exit"
             echo ""
             echo "CONFIG FILE (~/.agent_sandboxes/config):"
-            echo "  Optional bash file sourced at startup to extend default mounts,"
-            echo "  e.g. for standard paths you always need:"
-            echo "      SANDBOX_RO_MOUNTS=(\"\$HOME/.cargo\")"
-            echo "      SANDBOX_RW_MOUNTS=(\"\$HOME/.config/myagent\")"
+            echo "  Bash file holding the default mounts under \$HOME, created from a"
+            echo "  built-in template on first run so the script itself needs no edits:"
+            echo "      SANDBOX_RO_MOUNTS=(\"\$HOME/.nvm\" \"\$HOME/.gitconfig\")"
+            echo "      SANDBOX_RW_MOUNTS=(\"\$HOME/.claude\" \"\$HOME/.cache\")"
             echo "      SANDBOX_NO_MOUNTS=(.gemini)"
-            echo "  Entries support SRC or SRC:DEST like --mount-ro/--mount-rw;"
-            echo "  command-line --no-mount also applies to config entries."
+            echo "  Entries support SRC or SRC:DEST like --mount-ro/--mount-rw and are"
+            echo "  skipped with a warning when the source does not exist. System paths"
+            echo "  (/usr, /bin, /lib, /lib64, /etc) stay built in. Precedence is"
+            echo "  built-in < config < command line; --no-mount applies to the first two."
             echo ""
             echo "EXAMPLES:"
             echo "  agentwrap /project/path -- bash"
@@ -402,6 +474,11 @@ expand_tilde_path() {
     fi
 }
 
+mount_source_exists() {
+    local entry="$1"
+    [[ -e "${entry%%:*}" ]]
+}
+
 should_skip_default_mount() {
     local entry="$1"
     local host="${entry%%:*}"
@@ -441,59 +518,77 @@ for proj in "${PROJECT_PATHS[@]}"; do
 done
 
 # --- CONFIGURATION ---
-# Directories the agent can READ but not TOUCH
-DEFAULT_RO_MOUNTS=(
+# Base tier: paths the sandbox cannot work without, plus session state that is
+# derived here rather than user data. Not part of the user config, but
+# --no-mount still applies to them.
+BASE_RO_MOUNTS=(
     "/usr" "/bin" "/lib" "/lib64"
-    "$HOME/.nvm"
-    "$HOME/.miniconda3"
-    "$HOME/.local"
-    "$HOME/.gitconfig"
-    "$HOME/.ssh/known_hosts"
 )
 
-# Directories the agent has FULL autonomy over
 # Note: $MERGED is handled separately as the project root
-DEFAULT_RW_MOUNTS=(
-    "$HOME/.cache:$HOME/.cache"
-    "$HOME/.gemini"
-    "$HOME/.codex"
-    "$HOME/.local/share/opencode"
-    "$HOME/.claude"
-    "$HOME/.pi"
-    "$HOME/.claude.json"
+BASE_RW_MOUNTS=(
     "$BASH_HISTORY_FILE:$HOME/.bash_history"
 )
 
 # --- USER MOUNT CONFIG ---
-# Optional bash-sourced config extending the default mount lists, so standard
-# paths don't need to be repeated on every command line. Recognized arrays:
-#   SANDBOX_RO_MOUNTS=(...)  extra read-only mounts (SRC or SRC:DEST)
-#   SANDBOX_RW_MOUNTS=(...)  extra read-write mounts (SRC or SRC:DEST)
-#   SANDBOX_NO_MOUNTS=(...)  default mounts to skip (same matching as --no-mount)
-MOUNT_CONFIG="$HOME/.agent_sandboxes/config"
-if [[ -f "$MOUNT_CONFIG" ]]; then
-    SANDBOX_RO_MOUNTS=()
-    SANDBOX_RW_MOUNTS=()
-    SANDBOX_NO_MOUNTS=()
-    source "$MOUNT_CONFIG"
-    DEFAULT_RO_MOUNTS+=("${SANDBOX_RO_MOUNTS[@]}")
-    DEFAULT_RW_MOUNTS+=("${SANDBOX_RW_MOUNTS[@]}")
-    NO_MOUNTS+=("${SANDBOX_NO_MOUNTS[@]}")
+# Bash-sourced config holding the default mounts under $HOME, so toolchains and
+# agent state can be adapted without editing this script. Created from the
+# built-in template on first run. Recognized arrays:
+#   SANDBOX_RO_MOUNTS=(...)  read-only mounts (SRC or SRC:DEST)
+#   SANDBOX_RW_MOUNTS=(...)  read-write mounts (SRC or SRC:DEST)
+#   SANDBOX_NO_MOUNTS=(...)  entries to skip (same matching as --no-mount)
+if [[ ! -f "$MOUNT_CONFIG" ]]; then
+    if print_default_config > "$MOUNT_CONFIG"; then
+        echo "agentwrap: wrote default mount config to $MOUNT_CONFIG"
+    else
+        echo "agentwrap: failed to write $MOUNT_CONFIG" >&2
+        exit 1
+    fi
 fi
 
-for mount in "${DEFAULT_RO_MOUNTS[@]}"; do
+SANDBOX_RO_MOUNTS=()
+SANDBOX_RW_MOUNTS=()
+SANDBOX_NO_MOUNTS=()
+if ! source "$MOUNT_CONFIG"; then
+    echo "agentwrap: failed to read $MOUNT_CONFIG; refusing to run with a partial mount list." >&2
+    exit 1
+fi
+NO_MOUNTS+=("${SANDBOX_NO_MOUNTS[@]}")
+
+# Configs predating the version marker were written when these arrays only
+# extended a hardcoded list; they now replace the $HOME defaults instead.
+if ! grep -qE '^# agentwrap config v[0-9]+' "$MOUNT_CONFIG"; then
+    echo "agentwrap: $MOUNT_CONFIG has no version marker." >&2
+    echo "agentwrap: its arrays now replace the built-in \$HOME mounts instead of extending them." >&2
+    echo "agentwrap: compare with 'agentwrap --print-config'; add the marker line to silence this." >&2
+fi
+
+# bwrap applies binds in order and later ones win, so compose the tiers
+# built-in -> config -> command line. Config and built-in entries are optional;
+# a missing source is skipped rather than failing the whole sandbox.
+for mount in "${BASE_RO_MOUNTS[@]}" "${SANDBOX_RO_MOUNTS[@]}"; do
     if should_skip_default_mount "$mount"; then
+        continue
+    fi
+    if ! mount_source_exists "$mount"; then
+        echo "agentwrap: skipping read-only mount, no such path: ${mount%%:*}" >&2
         continue
     fi
     RO_MOUNTS+=("$mount")
 done
+RO_MOUNTS+=("${CLI_RO_MOUNTS[@]}")
 
-for mount in "${DEFAULT_RW_MOUNTS[@]}"; do
+for mount in "${BASE_RW_MOUNTS[@]}" "${SANDBOX_RW_MOUNTS[@]}"; do
     if should_skip_default_mount "$mount"; then
+        continue
+    fi
+    if ! mount_source_exists "$mount"; then
+        echo "agentwrap: skipping read-write mount, no such path: ${mount%%:*}" >&2
         continue
     fi
     RW_MOUNTS+=("$mount")
 done
+RW_MOUNTS+=("${CLI_RW_MOUNTS[@]}")
 # ---------------------
 
 # --- STABLE DNS SETUP ---

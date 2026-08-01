@@ -1,7 +1,7 @@
 # agentwrap
 
 High-security, low-overhead sandbox wrapper for running AI agents in a disposable overlay of real project directories. It creates per-project overlayfs mounts, isolates the environment with bubblewrap, and records each session.
-Supports the standard directories of claude code, codex, opencode and pi out of the box. (Edit if you want to leave some out).
+Supports the standard directories of claude code, codex, opencode and pi out of the box. Which of them get mounted lives in `~/.agent_sandboxes/config`, written on first run — no need to edit the script.
 
 ## Features
 
@@ -13,6 +13,7 @@ Supports the standard directories of claude code, codex, opencode and pi out of 
 - **Session recording** to timestamped logs
 - **Flexible sync operations**: apply changes (`--sync-out`), discard changes (`--sync-in`), or check diffs
 - **Read-only mounts** for common system and user tooling
+- **Mount defaults in a config file** (`~/.agent_sandboxes/config`), generated on first run
 - **Maps conda and nvm** environments from outside to within the container
 
 ## Requirements
@@ -75,20 +76,41 @@ By default the sandbox **inherits the full host environment** (including any sec
 
 #### Utility Options
 - `--unlock`: Remove stale lock file(s) for the specified project(s) and exit
+- `--print-config`: Print the built-in mount config template to stdout and exit
 - `--help`: Show usage information
 
 ### Configuration file (`~/.agent_sandboxes/config`)
 
-Optional bash file sourced at startup to extend the default mount lists, so standard paths don't have to be repeated on every command line:
+The default mounts under `$HOME` live in this file, not in the script. It is created from a built-in template on the first run and sourced as bash, so `$HOME` and other variables expand and conditionals work:
 
 ```bash
-# ~/.agent_sandboxes/config
-SANDBOX_RO_MOUNTS=("$HOME/.cargo" "$HOME/.rustup")   # extra read-only mounts
-SANDBOX_RW_MOUNTS=("$HOME/.config/myagent")          # extra read-write mounts
-SANDBOX_NO_MOUNTS=(.gemini .codex)                   # default mounts to skip
+# agentwrap config v1
+SANDBOX_RO_MOUNTS=(          # toolchains and identity the agent may read
+    "$HOME/.nvm"
+    "$HOME/.miniconda3"
+    "$HOME/.local"
+    "$HOME/.gitconfig"
+    "$HOME/.ssh/known_hosts"
+)
+SANDBOX_RW_MOUNTS=(          # agent state that has to survive the sandbox
+    "$HOME/.cache"
+    "$HOME/.claude"
+    "$HOME/.claude.json"
+    "$HOME/.codex"
+    "$HOME/.gemini"
+    "$HOME/.pi"
+    "$HOME/.local/share/opencode"
+)
+SANDBOX_NO_MOUNTS=()         # entries to drop from the lists above
 ```
 
-Entries support `SRC` or `SRC:DEST` mapping like `--mount-ro`/`--mount-rw`. Command-line `--no-mount` also applies to config entries.
+- Entries are `SRC` or `SRC:DEST` like `--mount-ro`/`--mount-rw`.
+- A missing source is **skipped with a warning** instead of aborting the sandbox, so listing an agent you haven't installed is harmless. Command-line `--mount-ro`/`--mount-rw` still fail hard, since those are explicit requests.
+- System paths (`/usr`, `/bin`, `/lib`, `/lib64`, `/etc`) and session state (bash history, ssh jail, ssh control sockets) stay built into the script.
+- Precedence is built-in → config → command line, and `bwrap` lets later binds win. `--no-mount` and `SANDBOX_NO_MOUNTS` apply to the first two tiers, never to explicit command-line mounts.
+- Run `agentwrap --print-config` to reprint the current template, e.g. to diff your file against it after an update.
+
+**Changed in this version:** these arrays used to *extend* a hardcoded list inside the script; they now *define* the `$HOME` tier. A config file written before this change lacks the `# agentwrap config v1` marker on line 1, so agentwrap prints a one-time hint per run until you merge the template in (or just add the marker line if your file is already complete).
 
 ### Examples
 
@@ -175,6 +197,9 @@ agentwrap --sync-in ~/src/frontend ~/src/backend
 
 ## How it works (high level)
 
+- **User configuration**: `~/.agent_sandboxes/` holds the two files you edit:
+  - `sandbox_profile` - becomes `~/.bashrc` inside the sandbox
+  - `config` - the default mounts under `$HOME` (see above), generated on first run
 - **Per-project sandboxes**: Each project gets its own sandbox under `~/.agent_sandboxes/<project>_<hash>` containing:
   - `upper/` - overlay layer where all modifications are stored
   - `work/` - fuse-overlayfs temporary directory
