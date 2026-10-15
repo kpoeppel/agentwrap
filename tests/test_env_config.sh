@@ -117,6 +117,12 @@ check "generated config carries the version marker" \
     "^# agentwrap config v1$" "$(cat "$MOUNT_CONFIG")"
 check "generated config lists the agent state dirs" \
     '"\$HOME/.claude"' "$(cat "$MOUNT_CONFIG")"
+check "generated config lists the tmux config" \
+    '"\$HOME/.tmux.conf"' "$(cat "$MOUNT_CONFIG")"
+check "generated config lists the tmux state dir" \
+    '"\$HOME/.tmux"' "$(cat "$MOUNT_CONFIG")"
+check "generated config declares SANDBOX_ENV" \
+    '^SANDBOX_ENV=()' "$(cat "$MOUNT_CONFIG")"
 check_absent "generated config leaves system paths to the script" \
     '"/usr"' "$(cat "$MOUNT_CONFIG")"
 
@@ -186,6 +192,7 @@ cat > "$MOUNT_CONFIG" <<EOF
 SANDBOX_RO_MOUNTS=("$EXTRA_RO:$FAKE_HOME/mnt_ro")
 SANDBOX_RW_MOUNTS=("$EXTRA_RW:$FAKE_HOME/mnt_rw" "\$HOME/.gemini")
 SANDBOX_NO_MOUNTS=(.gemini)
+SANDBOX_ENV=("FOO=bar baz" "BAZ=qux")
 EOF
 CMD=$(dry_run "$PROJECT" -- true)
 check "config file adds RO mount" "--ro-bind $EXTRA_RO $FAKE_HOME/mnt_ro" "$CMD"
@@ -196,6 +203,12 @@ check_absent "config without .claude drops the default .claude mount" \
     "--bind $FAKE_HOME/.claude " "$CMD"
 check_absent "config SANDBOX_NO_MOUNTS skips a config entry" \
     "--bind $FAKE_HOME/.gemini" "$CMD"
+check "config SANDBOX_ENV entry is applied" '--setenv FOO bar\\ baz' "$CMD"
+check "config SANDBOX_ENV second entry is applied" "--setenv BAZ qux" "$CMD"
+
+CMD=$(dry_run --setenv FOO cli "$PROJECT" -- true)
+check "command-line --setenv overrides SANDBOX_ENV (last wins)" \
+    '--setenv FOO bar\\ baz .*--setenv FOO cli' "$CMD"
 
 CMD=$(dry_run --no-mount mnt_ro "$PROJECT" -- true)
 check_absent "command-line --no-mount skips a config entry" \
@@ -204,6 +217,18 @@ check_absent "command-line --no-mount skips a config entry" \
 CMD=$(dry_run --mount-rw "$EXTRA_RW:$FAKE_HOME/mnt_rw" "$PROJECT" -- true)
 check "command-line mounts are applied after config ones (last bind wins)" \
     "--bind $EXTRA_RW $FAKE_HOME/mnt_rw .*--bind $EXTRA_RW $FAKE_HOME/mnt_rw" "$CMD"
+
+cat > "$MOUNT_CONFIG" <<EOF
+# agentwrap config v1
+SANDBOX_ENV=("NOEQUALS" "=emptyvar" "OK=fine")
+EOF
+OUT=$(dry_run_all "$PROJECT" -- true)
+CMD=$(dry_run "$PROJECT" -- true)
+check "SANDBOX_ENV entry without '=' warns" "SANDBOX_ENV entry without '='" "$OUT"
+check "SANDBOX_ENV entry with empty name warns" "empty variable name" "$OUT"
+check "well-formed SANDBOX_ENV entry is still applied" "--setenv OK fine" "$CMD"
+check_absent "malformed SANDBOX_ENV entry is not applied" "NOEQUALS" "$CMD"
+check_absent "empty-name SANDBOX_ENV entry is not applied" "emptyvar" "$CMD"
 
 rm -f "$MOUNT_CONFIG"
 
@@ -265,6 +290,7 @@ else
 SANDBOX_RO_MOUNTS=("$EXTRA_RO:$FAKE_HOME/mnt_ro")
 SANDBOX_RW_MOUNTS=("$EXTRA_RW:$FAKE_HOME/mnt_rw" "\$HOME/.gemini")
 SANDBOX_NO_MOUNTS=(.gemini)
+SANDBOX_ENV=("GREETING=hello world")
 EOF
     OUT=$(run_sandboxed "$PROJECT" -- bash -c '
         cat "$HOME/mnt_ro/marker.txt" 2>&1
@@ -272,12 +298,14 @@ EOF
         (echo w > "$HOME/mnt_rw/new.txt") 2>/dev/null && echo RW_OK || echo RW_BLOCKED
         [ -e "$HOME/.gemini" ] && echo GEMINI_PRESENT || echo GEMINI_SKIPPED
         [ -e "$HOME/.claude" ] && echo CLAUDE_PRESENT || echo CLAUDE_MISSING
+        echo "GREETING=${GREETING:-unset}"
     ')
     check "config RO mount is visible at mapped dest" "^ro-content$" "$OUT"
     check "config RO mount rejects writes" "^RO_BLOCKED$" "$OUT"
     check "config RW mount accepts writes" "^RW_OK$" "$OUT"
     check "config SANDBOX_NO_MOUNTS skips a config entry" "^GEMINI_SKIPPED$" "$OUT"
     check "config replaces the built-in \$HOME defaults" "^CLAUDE_MISSING$" "$OUT"
+    check "config SANDBOX_ENV reaches the sandbox" "^GREETING=hello world$" "$OUT"
 
     if [ -f "$EXTRA_RW/new.txt" ]; then
         echo "PASS: config RW mount write reached the host directory"

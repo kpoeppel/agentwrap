@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run GPU, Apptainer and Flatpak tests both outside and inside the sandbox,
 # comparing default (restricted) vs. --allow-gpu / --allow-apptainer /
-# --allow-flatpak, plus self-contained env/config assertion tests.
+# --allow-flatpak, plus self-contained env/config and isolation assertion tests.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -79,8 +79,9 @@ sep "SANDBOX with --allow-gpu"
 bash "$AGENTWRAP" --allow-gpu "$TEST_PROJECT" -- bash -c "$GPU_TEST"
 bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
 
-sep "SANDBOX with --allow-apptainer"
-bash "$AGENTWRAP" --allow-apptainer "$TEST_PROJECT" -- bash -c "$APPTAINER_TEST"
+sep "SANDBOX with --allow-apptainer --allow-net"
+# docker:// pulls need egress; network is isolated by default now.
+bash "$AGENTWRAP" --allow-apptainer --allow-net "$TEST_PROJECT" -- bash -c "$APPTAINER_TEST"
 bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
 
 sep "SANDBOX with --allow-flatpak"
@@ -89,6 +90,9 @@ bash "$AGENTWRAP" --unlock "$TEST_PROJECT" 2>/dev/null
 
 sep "ENV / CONFIG ASSERTION TESTS"
 bash "$SCRIPT_DIR/test_env_config.sh"
+
+sep "ISOLATION DEFAULTS ASSERTION TESTS"
+bash "$SCRIPT_DIR/test_isolation_defaults.sh"
 
 sep "CLEANUP"
 rm -rf "$TEST_PROJECT"

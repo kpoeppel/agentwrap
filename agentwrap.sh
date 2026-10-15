@@ -32,6 +32,8 @@ SANDBOX_RO_MOUNTS=(
     "$HOME/.miniconda3"
     "$HOME/.local"
     "$HOME/.gitconfig"
+    "$HOME/.tmux.conf"        # tmux config (history-limit, keybindings, ...)
+    "$HOME/.tmux"             # tmux plugins / resurrect state (RO: no writes)
     "$HOME/.ssh/known_hosts"
 )
 
@@ -50,6 +52,12 @@ SANDBOX_RW_MOUNTS=(
 # Entries to drop from the lists above, matched by basename or full path
 # (same as the --no-mount option).
 SANDBOX_NO_MOUNTS=()
+
+# Extra environment variables exported inside the sandbox, as VAR=VALUE
+# entries. Applied after the built-in and --allow-* settings but before
+# --setenv, so command-line values win. Example:
+#   SANDBOX_ENV=("EDITOR=vim" "PAGER=less")
+SANDBOX_ENV=()
 EOF
 }
 
@@ -81,6 +89,12 @@ UNLOCK_ONLY=""
 ALLOW_GPU=""
 ALLOW_APPTAINER=""
 ALLOW_FLATPAK=""
+ALLOW_NET=""          # "", "host" or "isolated"
+NET_WRAPPER_ARGS=()
+ALLOW_X11=""          # "", "real" or "virtual"
+ALLOW_DBUS=""
+ALLOW_KEYRING=""
+XVFB_PID=""
 CLEARENV=""
 SETENV_ARGS=()
 
@@ -91,6 +105,13 @@ while [[ $# -gt 0 ]]; do
         --allow-ssh)
             ALLOWED_HOSTS+=("$2")
             ENABLE_SSH=1
+            # SSH needs real egress, which the isolated default netns cannot
+            # provide. Default to the host network namespace unless the user
+            # already selected an explicit mode (e.g. --allow-net=isolated).
+            if [[ -z "$ALLOW_NET" ]]; then
+                ALLOW_NET=host
+                echo "agentwrap: --allow-ssh implies --allow-net; the host network namespace (internet, LAN, host loopback) will be shared. Use --allow-net=isolated for a private NAT." >&2
+            fi
             shift 2
             ;;
         --allow-gpu)
@@ -103,6 +124,45 @@ while [[ $# -gt 0 ]]; do
             ;;
         --allow-flatpak)
             ALLOW_FLATPAK=1
+            shift 1
+            ;;
+        --allow-net)
+            ALLOW_NET=host
+            shift 1
+            ;;
+        --allow-net=host)
+            ALLOW_NET=host
+            shift 1
+            ;;
+        --allow-net=isolated)
+            ALLOW_NET=isolated
+            shift 1
+            ;;
+        --allow-net=*)
+            echo "agentwrap: --allow-net expects 'host' or 'isolated'."
+            exit 1
+            ;;
+        --allow-x11)
+            ALLOW_X11=real
+            shift 1
+            ;;
+        --allow-x11=*)
+            ALLOW_X11="${1#--allow-x11=}"
+            case "$ALLOW_X11" in
+                real|virtual) ;;
+                *)
+                    echo "agentwrap: --allow-x11 expects 'real' or 'virtual'."
+                    exit 1
+                    ;;
+            esac
+            shift 1
+            ;;
+        --allow-dbus)
+            ALLOW_DBUS=1
+            shift 1
+            ;;
+        --allow-keyring)
+            ALLOW_KEYRING=1
             shift 1
             ;;
         --clearenv)
@@ -188,6 +248,16 @@ while [[ $# -gt 0 ]]; do
             echo "  --allow-gpu           Pass through NVIDIA GPU devices into sandbox"
             echo "  --allow-apptainer     Allow Apptainer (Singularity) container execution"
             echo "  --allow-flatpak       Pass through flatpak runtime dirs and session bus"
+            echo "  --allow-net[=MODE]    Allow network. MODE 'host' shares the host network"
+            echo "                        namespace (internet, LAN, host loopback, host"
+            echo "                        abstract sockets); MODE 'isolated' builds a private"
+            echo "                        rootless NAT with rootlesskit+slirp4netns (blocks"
+            echo "                        host loopback). Default: no network."
+            echo "  --allow-x11[=MODE]    Allow X11. MODE 'real' mounts the host display"
+            echo "                        (full screen/input/clipboard access); MODE 'virtual'"
+            echo "                        starts a private Xvfb. Default: no X11."
+            echo "  --allow-dbus          Expose the session D-Bus (implies --allow-keyring)"
+            echo "  --allow-keyring       Do not mask ~/.local/share/keyrings (default: masked)"
             echo "  --clearenv            Start from an empty environment inside the sandbox"
             echo "                        (built-in vars like PATH/HOME are still set)"
             echo "  --setenv VAR VALUE    Set VAR=VALUE inside the sandbox (repeatable)"
@@ -204,9 +274,11 @@ while [[ $# -gt 0 ]]; do
             echo "      SANDBOX_RO_MOUNTS=(\"\$HOME/.nvm\" \"\$HOME/.gitconfig\")"
             echo "      SANDBOX_RW_MOUNTS=(\"\$HOME/.claude\" \"\$HOME/.cache\")"
             echo "      SANDBOX_NO_MOUNTS=(.gemini)"
+            echo "      SANDBOX_ENV=(\"EDITOR=vim\" \"PAGER=less\")"
             echo "  Entries support SRC or SRC:DEST like --mount-ro/--mount-rw and are"
             echo "  skipped with a warning when the source does not exist. System paths"
-            echo "  (/usr, /bin, /lib, /lib64, /etc) stay built in. Precedence is"
+            echo "  (/usr, /bin, /lib, /lib64, /etc) stay built in. SANDBOX_ENV entries are"
+            echo "  VAR=VALUE strings exported into the sandbox. Precedence is"
             echo "  built-in < config < command line; --no-mount applies to the first two."
             echo ""
             echo "EXAMPLES:"
@@ -549,6 +621,7 @@ fi
 SANDBOX_RO_MOUNTS=()
 SANDBOX_RW_MOUNTS=()
 SANDBOX_NO_MOUNTS=()
+SANDBOX_ENV=()
 if ! source "$MOUNT_CONFIG"; then
     echo "agentwrap: failed to read $MOUNT_CONFIG; refusing to run with a partial mount list." >&2
     exit 1
@@ -602,6 +675,11 @@ cat /etc/resolv.conf > "$AGENT_RESOLV"
 if ! grep -q "nameserver" "$AGENT_RESOLV"; then
     echo "nameserver 1.1.1.1" >> "$AGENT_RESOLV"
     echo "nameserver 8.8.8.8" >> "$AGENT_RESOLV"
+fi
+# slirp4netns serves DNS at 10.0.2.3; the host resolvers are unreachable
+# from the isolated user-mode network.
+if [[ "$ALLOW_NET" == isolated ]]; then
+    echo "nameserver 10.0.2.3" > "$AGENT_RESOLV"
 fi
 
 
@@ -800,6 +878,13 @@ acquire_all_locks() {
 }
 
 cleanup() {
+    # Stop a private Xvfb started by --allow-x11=virtual
+    if [[ -n "${XVFB_PID:-}" ]]; then
+        kill "$XVFB_PID" 2>/dev/null
+        wait "$XVFB_PID" 2>/dev/null
+        XVFB_PID=""
+    fi
+
     # Unmount all project overlays
     for proj in "${PROJECT_PATHS[@]}"; do
         local merged=$(get_project_merged "$proj")
@@ -902,7 +987,6 @@ BWRAP_ARGS=(
     --chdir "$PROJECT_SRC"          # Start in the first project directory
     --ro-bind "$AGENT_CONFIG" "$HOME/.bashrc"
     --unshare-all
-    --share-net
     --dir $HOME/.ssh
     --die-with-parent
     --setenv PATH "$CONDA_PREFIX/bin:$HOME/.local/bin:$HOME/.miniconda3/bin:/usr/bin:/bin"
@@ -911,6 +995,13 @@ BWRAP_ARGS=(
     --setenv NVM_DIR "$HOME/.nvm"
     --setenv HOME "$HOME"
     --setenv AGENTWRAP_ACTIVE "1"
+    # Host session state must not leak in by default. The matching --allow-*
+    # branches re-add what they need later; bwrap applies env options in order,
+    # so a later --setenv wins over these --unsetenv entries.
+    --unsetenv DISPLAY
+    --unsetenv DBUS_SESSION_BUS_ADDRESS
+    --unsetenv XDG_RUNTIME_DIR
+    --unsetenv SSH_AUTH_SOCK
     --ro-bind "/etc" "/etc"
     --ro-bind "$AGENT_RESOLV" "$INTERNAL_DNS_PATH"
 )
@@ -985,7 +1076,112 @@ if [[ -n "$ALLOW_FLATPAK" ]]; then
     done
     BWRAP_ARGS+=(--setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_HOST"
                  --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=$XDG_RUNTIME_HOST/bus")
+    # The session bus reaches the running secret service, so the on-disk mask
+    # would be cosmetic; unmask for consistency with --allow-dbus.
+    ALLOW_KEYRING=1
 fi
+
+# --- NETWORK, DBUS AND X11 PASSTHROUGH (all off by default) ---
+# --unshare-all already creates a private network namespace, so host loopback
+# services, LAN hosts and host abstract unix sockets (X11, systemd, ...) are
+# unreachable by default. --allow-net re-enables networking in one of two ways:
+#   host      retain the host network namespace (blunt: also exposes host
+#             loopback services and host abstract sockets)
+#   isolated  run the whole sandbox under rootlesskit + slirp4netns, which
+#             provides user-mode NAT in a private netns and blocks the host
+#             loopback. Requires rootlesskit and slirp4netns.
+if [[ "$ALLOW_NET" == isolated ]]; then
+    if ! command -v rootlesskit >/dev/null 2>&1; then
+        echo "agentwrap: --allow-net=isolated requires rootlesskit." >&2
+        exit 1
+    fi
+    if ! command -v slirp4netns >/dev/null 2>&1; then
+        echo "agentwrap: --allow-net=isolated requires slirp4netns." >&2
+        exit 1
+    fi
+    NET_WRAPPER_ARGS=(rootlesskit --net=slirp4netns --disable-host-loopback
+                      --port-driver=none --copy-up=/etc)
+fi
+if [[ -n "$ALLOW_NET" ]]; then
+    BWRAP_ARGS+=(--share-net)
+fi
+
+# The session bus is a filesystem socket, so it works even in an isolated
+# network namespace. Reaching it also reaches the secret service, which serves
+# the keyring regardless of the on-disk mask below, so unmask in that case.
+if [[ -n "$ALLOW_DBUS" ]]; then
+    XDG_RUNTIME_HOST="/run/user/$(id -u)"
+    [[ -e "$XDG_RUNTIME_HOST/bus" ]] && \
+        BWRAP_ARGS+=(--bind "$XDG_RUNTIME_HOST/bus" "$XDG_RUNTIME_HOST/bus")
+    BWRAP_ARGS+=(--setenv XDG_RUNTIME_DIR "$XDG_RUNTIME_HOST"
+                 --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=$XDG_RUNTIME_HOST/bus")
+    ALLOW_KEYRING=1
+fi
+
+# X11 is a filesystem socket, so it works in an isolated network namespace too.
+# 'real' hands over the host display; 'virtual' starts a throwaway Xvfb so the
+# agent gets a screen without access to the user's session.
+if [[ -n "$ALLOW_X11" ]]; then
+    case "$ALLOW_X11" in
+        real)
+            if [[ -d /tmp/.X11-unix ]]; then
+                BWRAP_ARGS+=(--ro-bind /tmp/.X11-unix /tmp/.X11-unix)
+            fi
+            [[ -f "$HOME/.Xauthority" ]] && \
+                BWRAP_ARGS+=(--ro-bind "$HOME/.Xauthority" "$HOME/.Xauthority")
+            BWRAP_ARGS+=(--setenv DISPLAY "${DISPLAY:-:0}")
+            echo "agentwrap: --allow-x11=real grants full access to display ${DISPLAY:-:0} (screen, input, clipboard)." >&2
+            ;;
+        virtual)
+            if ! command -v Xvfb >/dev/null 2>&1; then
+                echo "agentwrap: --allow-x11=virtual needs Xvfb (install the xvfb package); use --allow-x11=real for the host display." >&2
+                exit 1
+            fi
+            VIRTUAL_DISPLAY=""
+            for n in $(seq 99 -1 1); do
+                if [[ ! -e "/tmp/.X11-unix/X$n" ]]; then
+                    VIRTUAL_DISPLAY=":$n"
+                    break
+                fi
+            done
+            if [[ -z "$VIRTUAL_DISPLAY" ]]; then
+                echo "agentwrap: no free X display number available for Xvfb." >&2
+                exit 1
+            fi
+            VIRTUAL_X_SOCKET="X${VIRTUAL_DISPLAY#:}"
+            Xvfb "$VIRTUAL_DISPLAY" -screen 0 1920x1080x24 -nolisten tcp -ac >/dev/null 2>&1 &
+            XVFB_PID=$!
+            for _ in $(seq 1 50); do
+                [[ -e "/tmp/.X11-unix/$VIRTUAL_X_SOCKET" ]] && break
+                sleep 0.1
+            done
+            if [[ ! -e "/tmp/.X11-unix/$VIRTUAL_X_SOCKET" ]]; then
+                echo "agentwrap: Xvfb failed to start on $VIRTUAL_DISPLAY." >&2
+                kill "$XVFB_PID" 2>/dev/null
+                exit 1
+            fi
+            BWRAP_ARGS+=(--dir /tmp/.X11-unix
+                         --ro-bind "/tmp/.X11-unix/$VIRTUAL_X_SOCKET" "/tmp/.X11-unix/$VIRTUAL_X_SOCKET"
+                         --setenv DISPLAY "$VIRTUAL_DISPLAY")
+            echo "agentwrap: --allow-x11=virtual started a private Xvfb on $VIRTUAL_DISPLAY."
+            ;;
+    esac
+fi
+
+# Config-tier environment variables. Precedence is built-in < config <
+# command line, so these come after the built-in/--allow-* setenvs and before
+# the user's --setenv values (bwrap applies env options in order).
+for kv in "${SANDBOX_ENV[@]}"; do
+    if [[ "$kv" != *=* ]]; then
+        echo "agentwrap: SANDBOX_ENV entry without '=': $kv" >&2
+        continue
+    fi
+    if [[ -z "${kv%%=*}" ]]; then
+        echo "agentwrap: SANDBOX_ENV entry has an empty variable name: $kv" >&2
+        continue
+    fi
+    BWRAP_ARGS+=(--setenv "${kv%%=*}" "${kv#*=}")
+done
 
 # User-supplied --setenv values go last so they override built-in and
 # mode-specific (e.g. flatpak) env settings.
@@ -1049,6 +1245,18 @@ for mapping in "${RW_MOUNTS[@]}"; do
         BWRAP_ARGS+=(--bind "$mapping" "$mapping")
     fi
 done
+
+# Mask secret stores that would otherwise come in through the ~/.local
+# read-only mount. Applied after every other bind so it always wins; use
+# --allow-keyring (or --allow-dbus, which reaches the secret service anyway)
+# to opt out.
+if [[ -z "$ALLOW_KEYRING" ]]; then
+    for secret_store in "$HOME/.local/share/keyrings"; do
+        if [[ -e "$secret_store" ]]; then
+            BWRAP_ARGS+=(--tmpfs "$secret_store")
+        fi
+    done
+fi
 BWRAP_ARGS+=(--bind "$ENTRYPOINT" "$HOME/entrypoint.sh")
 
 echo "--- Sandbox Active: Recording to $LOG_FILE ---"
@@ -1059,7 +1267,15 @@ echo "${BWRAP_ARGS[*]}"
 # prlimit --as=$MEM_LIMIT --nproc=1000
 # %q-quote each arg so values with spaces or empty strings survive the
 # flattening into the shell command string that 'script' executes.
-BWRAP_CMD="bwrap $(printf "%q " "${BWRAP_ARGS[@]}") $HOME/entrypoint.sh"
+# --allow-net=isolated keeps the rootlesskit/slirp4netns network namespace by
+# retaining it with --share-net while wrapping the bwrap command in rootlesskit.
+# Guard the prefix: printf on an empty array emits "'' ", which would break the
+# "bwrap ..." command line expected by tests and logs.
+if [[ ${#NET_WRAPPER_ARGS[@]} -gt 0 ]]; then
+    BWRAP_CMD="$(printf "%q " "${NET_WRAPPER_ARGS[@]}")bwrap $(printf "%q " "${BWRAP_ARGS[@]}") $HOME/entrypoint.sh"
+else
+    BWRAP_CMD="bwrap $(printf "%q " "${BWRAP_ARGS[@]}") $HOME/entrypoint.sh"
+fi
 script -q -f -c "$BWRAP_CMD" "$LOG_FILE"
 
 # Optional: Clean up empty log files
