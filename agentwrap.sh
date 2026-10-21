@@ -796,7 +796,10 @@ for HOST in "${ALLOWED_HOSTS[@]}"; do
         ID_FILE=""
     fi
 
-    if [ -f "$ID_FILE" ]; then
+    if [[ -n "$ID_FILE" ]] && should_skip_default_mount "$ID_FILE"; then
+        echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
+        echo "  IdentitiesOnly yes" >> "$SSH_JAIL/config"
+    elif [[ -f "$ID_FILE" ]]; then
         RO_MOUNTS+=("$ID_FILE")
         echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
         echo "  IdentitiesOnly yes" >> "$SSH_JAIL/config"
