@@ -723,89 +723,86 @@ fi
 for HOST in "${ALLOWED_HOSTS[@]}"; do
     echo "Scoping SSH access for: $HOST"
 
-    # 1. Get the resolved config for this host
-    # 2. Filter out things we don't want (like ControlPath or local includes)
-    # 3. Force BatchMode for non-interactive agents
+    # Copy every option the user's ssh config sets for this host (anything
+    # where `ssh -G HOST` differs from `ssh -G -F /dev/null HOST`), minus a
+    # denylist of options the sandbox must override or cannot honour. Files
+    # those options reference (keys, certificates, known_hosts) are mounted
+    # read-only. ssh keywords are case-insensitive, so the lowercase names
+    # from `ssh -G` are valid config.
     echo "" >> "$SSH_JAIL/config"
     echo "Host $HOST" >> "$SSH_JAIL/config"
-    RESOLVED_CFG=$(ssh -G "$HOST")
-    DEFAULT_CFG=$(ssh -G -F /dev/null "$HOST")
+    RESOLVED_CFG=$(ssh -G "$HOST" 2>/dev/null)
+    DEFAULT_CFG=$(ssh -G -F /dev/null "$HOST" 2>/dev/null)
+    if [[ -z "$RESOLVED_CFG" ]]; then
+        echo "agentwrap: 'ssh -G $HOST' failed; skipping its ssh config." >&2
+        continue
+    fi
+    # ssh -G expands ~ for some options but not others; normalise both sides
+    # so an untouched default does not look like a user setting.
+    RESOLVED_CFG="${RESOLVED_CFG// \~\// $HOME/}"
+    DEFAULT_CFG="${DEFAULT_CFG// \~\// $HOME/}"
 
-    # Helper function to extract and compare config values
-    extract_ssh_option() {
-        local option="$1"
-        local resolved_val=$(echo "$RESOLVED_CFG" | awk -v opt="$option" '$1 == opt {for(i=2;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":""); print ""}' | tail -n 1)
-        local default_val=$(echo "$DEFAULT_CFG" | awk -v opt="$option" '$1 == opt {for(i=2;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":""); print ""}' | tail -n 1)
+    # Keywords whose full (possibly multi-line) value differs from the
+    # default, in the order ssh -G prints them.
+    CHANGED_KEYS=$(awk 'NR == FNR { d[$1] = d[$1] "\n" $0; next }
+        { r[$1] = r[$1] "\n" $0; if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 } }
+        END { for (i = 1; i <= n; i++) if (r[order[i]] != d[order[i]]) print order[i] }' \
+        <(echo "$DEFAULT_CFG") <(echo "$RESOLVED_CFG"))
 
-        # Only output if different from default
-        if [[ -n "$resolved_val" && "$resolved_val" != "$default_val" ]]; then
-            echo "$resolved_val"
-        fi
-    }
+    HAS_ID_FILE=""
+    CONTROL_MASTER=""
+    for key in $CHANGED_KEYS; do
+        case "$key" in
+            # Rewritten below to sandbox paths.
+            controlpath|identityagent) continue ;;
+            # Run host helpers or load host libraries that are not part of
+            # the sandbox; drop rather than fail in confusing ways.
+            localcommand|permitlocalcommand|knownhostscommand|pkcs11provider|securitykeyprovider|xauthlocation) continue ;;
+            identityfile) HAS_ID_FILE=1 ;;
+            controlmaster) CONTROL_MASTER=$(echo "$RESOLVED_CFG" | awk '$1 == "controlmaster" {print $2}' | tail -n 1) ;;
+        esac
+        echo "$RESOLVED_CFG" | awk -v k="$key" '$1 == k {print "  " $0}' >> "$SSH_JAIL/config"
 
-    # Core connection options (always include these)
-    echo "$RESOLVED_CFG" | awk '$1 == "hostname" {print "  HostName " $2}' >> "$SSH_JAIL/config"
-    echo "$RESOLVED_CFG" | awk '$1 == "user" {print "  User " $2}' >> "$SSH_JAIL/config"
-
-    # Whitelist of additional SSH options to extract (if non-default)
-    # These are commonly needed and safe in a sandbox environment
-    SSH_OPTIONS=(
-        "port:Port"
-        "batchmode:BatchMode"
-        "compression:Compression"
-        "compressionlevel:CompressionLevel"
-        "connectionattempts:ConnectionAttempts"
-        "connecttimeout:ConnectTimeout"
-        "forwardagent:ForwardAgent"
-        "proxycommand:ProxyCommand"
-        "proxyjump:ProxyJump"
-        "serveraliveinterval:ServerAliveInterval"
-        "serveralivecountmax:ServerAliveCountMax"
-        "stricthostkeychecking:StrictHostKeyChecking"
-        "tcpkeepalive:TCPKeepAlive"
-        "setenv:SetEnv"
-        "controlmaster:ControlMaster"
-        "controlpersist:ControlPersist"
-    )
-
-    for opt_pair in "${SSH_OPTIONS[@]}"; do
-        opt_lower="${opt_pair%%:*}"
-        opt_proper="${opt_pair#*:}"
-        opt_value=$(extract_ssh_option "$opt_lower")
-        if [[ -n "$opt_value" ]]; then
-            echo "  $opt_proper $opt_value" >> "$SSH_JAIL/config"
-        fi
+        # Mount the files these options point at.
+        case "$key" in
+            identityfile|certificatefile|userknownhostsfile|globalknownhostsfile|revokedhostkeys) ;;
+            *) continue ;;
+        esac
+        for ref in $(echo "$RESOLVED_CFG" | awk -v k="$key" '$1 == k {for (i = 2; i <= NF; i++) print $i}'); do
+            ref="${ref//%d/$HOME}"
+            ref="${ref//%u/$USER}"
+            if [[ "$ref" == *%* ]]; then
+                echo "agentwrap: $key for $HOST uses unsupported % tokens, not mounted: $ref" >&2
+                continue
+            fi
+            [[ "$ref" == none ]] && continue
+            candidates=("$ref")
+            # ssh pairs an IdentityFile with "<file>.pub" (to match agent
+            # keys) and "<file>-cert.pub" (implicit certificate).
+            [[ "$key" == identityfile ]] && candidates+=("$ref.pub" "$ref-cert.pub")
+            for f in "${candidates[@]}"; do
+                if [[ ! -f "$f" ]]; then
+                    if [[ "$f" == "$ref" && ( "$key" == identityfile || "$key" == certificatefile ) ]]; then
+                        echo "agentwrap: $key for $HOST not found: $f" >&2
+                    fi
+                    continue
+                fi
+                should_skip_default_mount "$f" || RO_MOUNTS+=("$f")
+            done
+        done
     done
 
-    # Special handling for ControlPath: always override to use writable directory
-    # This enables SSH connection multiplexing (ControlMaster) to work in the sandbox
-    # Use %C (hash) to keep path short and avoid "name too long" errors
-    control_master=$(extract_ssh_option "controlmaster")
-    if [[ -n "$control_master" && "$control_master" != "no" ]]; then
-        # Force ControlPath to short sandbox path with hash format
-        echo "  ControlPath $SSH_CONTROL_DIR_SANDBOX/%C" >> "$SSH_JAIL/config"
+    # Without an explicit IdentityFile, ssh falls back to whatever keys the
+    # forwarded agent offers.
+    echo "  IdentityAgent /tmp/ssh-agent-dir/$SSH_AUTH_SOCK_FILENAME" >> "$SSH_JAIL/config"
+    if [[ -z "$HAS_ID_FILE" ]]; then
+        echo "agentwrap: no IdentityFile configured for $HOST; using keys from the ssh agent." >&2
     fi
 
-    # 4. Extract the IdentityFile path and add it to RO_MOUNTS
-    ID_FILE=$(echo "$RESOLVED_CFG" | awk '$1 == "identityfile" {print $2}' | head -n 1)
-    DEFAULT_ID_FILE=$(echo "$DEFAULT_CFG" | awk '$1 == "identityfile" {print $2}' | head -n 1)
-    # Expand tilde if necessary
-    ID_FILE="${ID_FILE/#\~/$HOME}"
-    DEFAULT_ID_FILE="${DEFAULT_ID_FILE/#\~/$HOME}"
-    if [[ -n "$DEFAULT_ID_FILE" && "$ID_FILE" == "$DEFAULT_ID_FILE" ]]; then
-        ID_FILE=""
-    fi
-
-    if [[ -n "$ID_FILE" ]] && should_skip_default_mount "$ID_FILE"; then
-        echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
-        echo "  IdentitiesOnly yes" >> "$SSH_JAIL/config"
-    elif [[ -f "$ID_FILE" ]]; then
-        RO_MOUNTS+=("$ID_FILE")
-        echo "  IdentityFile $ID_FILE" >> "$SSH_JAIL/config"
-        echo "  IdentitiesOnly yes" >> "$SSH_JAIL/config"
-    else
-        echo "  IdentityAgent /tmp/ssh-agent-dir/$SSH_AUTH_SOCK_FILENAME" >> "$SSH_JAIL/config"
-        echo "  IdentitiesOnly no" >> "$SSH_JAIL/config"
+    # ControlMaster needs a writable socket directory; use a short path with
+    # the %C hash to stay under the unix socket path limit.
+    if [[ -n "$CONTROL_MASTER" && "$CONTROL_MASTER" != no && "$CONTROL_MASTER" != false ]]; then
+        echo "  controlpath $SSH_CONTROL_DIR_SANDBOX/%C" >> "$SSH_JAIL/config"
     fi
 done
 
